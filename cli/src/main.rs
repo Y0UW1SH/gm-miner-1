@@ -46,11 +46,8 @@ use anyhow::Result;
 use chrono::Timelike as _;
 use clap::{Parser, Subcommand};
 use gm_miner_cli::{
-    client::RegistryClient,
-    deploy::{DEFAULT_BOOT_TIMEOUT_SECS, DEFAULT_OS_IMAGE},
-    network::Network,
-    pricing::parse_discount_pct,
-    types::Provider,
+    client::RegistryClient, deploy::DEFAULT_BOOT_TIMEOUT_SECS, network::Network,
+    pricing::parse_discount_pct, types::Provider,
 };
 
 use crate::commands::deploy::{
@@ -514,21 +511,19 @@ enum Command {
         gmcli update")]
     Update,
 
-    /// Show your miner's current chain emission on the subnet.
+    /// Show your miner's served earnings from the registry.
     ///
-    /// Reads your hotkey's neuron row straight from the subnet metagraph (via
-    /// btcli) and reports uid, stake, and per-tempo emission in the subnet's
-    /// alpha token. Reports on your own hotkey — taken from your login token,
+    /// Reports lifetime served value in USD and the latest finalized epochs.
+    /// Reports on your own hotkey — taken from your login token,
     /// or the one recorded by `register-hotkey` — so there's nothing to pass.
     ///
-    /// This is the on-chain emission view (v1). Your gm USD-spread earnings are
-    /// a future (v2) view.
+    /// This is served value, not on-chain payments or profit. No btcli is needed.
     #[command(after_help = "Examples:\n  \
         gmcli earnings\n  \
         gmcli --network testnet earnings")]
     Earnings {
-        /// Skip the btcli install prompt for non-interactive use.
-        #[arg(long)]
+        /// Accepted for backwards compatibility; no install prompt is needed.
+        #[arg(long, hide = true)]
         yes: bool,
     },
 
@@ -581,14 +576,15 @@ pub(crate) struct DeployFlags {
     ///
     /// Overrides the default. When set (or `GM_IMAGE_REF` is in env), this
     /// ref is embedded in the compose file directly with no build. When
-    /// omitted, `gmcli deploy` defaults to the registry's latest supported
+    /// omitted, `gmcli deploy` defaults to this CLI release's approved
     /// image — a normal miner deploys the gm-published image and never
     /// builds. Pass `--image-repo` instead to build and push your own.
     #[arg(long, env = "GM_IMAGE_REF")]
     pub(crate) image_ref: Option<String>,
 
     /// Pin to a specific approved version by index (1 = newest).
-    /// Defaults to the newest supported version.
+    /// Defaults to this CLI release's supported image. Explicit selections must
+    /// match the bundled deployment template.
     #[arg(long)]
     pub(crate) version: Option<usize>,
 
@@ -621,12 +617,6 @@ pub(crate) struct DeployFlags {
     /// Disk size for the CVM (with unit, e.g. `40G`).
     #[arg(long, env = "PHALA_DISK_SIZE", default_value = "40G")]
     pub(crate) disk_size: String,
-
-    /// Production OS image for the CVM (`phala deploy --image`). The
-    /// version must match the dstack version of the Phala node the CVM
-    /// lands on — prod5/prod9 currently run dstack v0.5.9.
-    #[arg(long, env = "PHALA_OS_IMAGE", default_value = DEFAULT_OS_IMAGE)]
-    pub(crate) os_image: String,
 
     /// Repository root used as the Docker build context. Defaults to
     /// the current directory.
@@ -805,7 +795,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             wallet,
             hotkey,
             yes,
-        } => cmd_register_hotkey(&context.config()?, hotkey_ss58, wallet, hotkey, yes),
+        } => cmd_register_hotkey(&context.config()?, hotkey_ss58, wallet, hotkey, yes).await,
         Command::RegisterImage { app_id } => {
             cmd_register_image_subcommand(context.authenticated_config().await?, &app_id).await
         }
@@ -819,7 +809,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
         Command::Sources => cmd_sources(&mut context.client().await?).await,
         // Upgrades must work with expired tokens or a damaged config.
         Command::Update => cmd_update().await,
-        Command::Earnings { yes } => cmd_earnings(&context.config()?, yes),
+        Command::Earnings { .. } => cmd_earnings(&context.config()?).await,
         Command::DeclareProduct {
             provider,
             model,
@@ -1021,7 +1011,6 @@ mod tests {
             image_tag: "v0.1.0".to_owned(),
             instance_type: "tdx.medium".to_owned(),
             disk_size: "40G".to_owned(),
-            os_image: "dstack-0.5.7".to_owned(),
             repo_root: None,
             version: None,
             boot_timeout_secs: 300,
@@ -1078,7 +1067,6 @@ mod tests {
             image_tag: "v0.1.0".to_owned(),
             instance_type: "tdx.medium".to_owned(),
             disk_size: "40G".to_owned(),
-            os_image: "dstack-0.5.7".to_owned(),
             repo_root: None,
             version: None,
             boot_timeout_secs: 300,
@@ -1145,7 +1133,6 @@ mod tests {
             image_tag: "v0.1.0".to_owned(),
             instance_type: "tdx.medium".to_owned(),
             disk_size: "40G".to_owned(),
-            os_image: "dstack-0.5.7".to_owned(),
             repo_root: None,
             version: None,
             boot_timeout_secs: 300,
@@ -1204,7 +1191,6 @@ mod tests {
             image_tag: "v0.1.0".to_owned(),
             instance_type: "tdx.medium".to_owned(),
             disk_size: "40G".to_owned(),
-            os_image: "dstack-0.5.7".to_owned(),
             repo_root: None,
             version: None,
             boot_timeout_secs: 300,
@@ -1260,7 +1246,6 @@ mod tests {
             image_tag: "v0.1.0".to_owned(),
             instance_type: "tdx.medium".to_owned(),
             disk_size: "40G".to_owned(),
-            os_image: "dstack-0.5.7".to_owned(),
             repo_root: None,
             version: None,
             boot_timeout_secs: 300,
@@ -1433,6 +1418,96 @@ mod tests {
         .expect("the only live worker is worker #1 whatever its local position");
     }
 
+    #[tokio::test]
+    async fn worker_add_rejects_missing_release_and_template_mismatch_before_cvm_creation() {
+        use super::{cmd_deploy, DeployArgs, RegistryClient, WorkerRegistration};
+        use gm_miner_cli::config::ProviderKeys;
+        use gm_miner_cli::deploy::{DeployOutcome, PhalaClient, RegistryCredentials};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        struct NoDeploy;
+        impl PhalaClient for NoDeploy {
+            fn deploy(
+                &self,
+                _: &str,
+                _: &ProviderKeys,
+                _: &str,
+                _: Option<&RegistryCredentials>,
+                _: u64,
+            ) -> anyhow::Result<DeployOutcome> {
+                anyhow::bail!("unexpected CVM creation attempt");
+            }
+            fn existing_cvm_app_id(&self) -> anyhow::Result<Option<String>> {
+                Ok(None)
+            }
+        }
+
+        for (tag, pin, expected) in [
+            ("v99.0.0", None, "no supported image"),
+            (
+                concat!("v", env!("CARGO_PKG_VERSION")),
+                None,
+                "no CVM was created",
+            ),
+            ("v99.0.0", Some(1), "no CVM was created"),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/image-versions"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "versions": [{
+                        "git_tag": tag, "status": "supported", "notes": null,
+                        "created_at": "2026-09-09T00:00:00Z",
+                        "compose_hash": "incompatible-template", "os_image_hash": "wrong-os",
+                        "image_ref": format!("ghcr.io/taostat/gm-miner@sha256:{}", "a".repeat(64))
+                    }]
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let mut cfg = cfg_with_workers(Some(server.uri()), vec![]);
+            cfg.provider_keys = Some(ProviderKeys {
+                anthropic: Some("test-key".to_owned()),
+                ..Default::default()
+            });
+            let args = DeployArgs {
+                app_name: "new-worker".to_owned(),
+                image_ref: None,
+                project_dir: std::path::PathBuf::from("unused"),
+                image_repo: None,
+                image_tag: "unused".to_owned(),
+                instance_type: "tdx.medium".to_owned(),
+                disk_size: "40G".to_owned(),
+                repo_root: None,
+                version: pin,
+                boot_timeout_secs: 300,
+                phala_api_key: None,
+                assume_yes: false,
+                accept_terms: false,
+            };
+            let mut client = RegistryClient::new(cfg.clone());
+            let error = cmd_deploy(
+                &cfg,
+                &mut client,
+                &NoDeploy,
+                &args,
+                &WorkerRegistration::Add {
+                    hotkey: "5HK".to_owned(),
+                },
+            )
+            .await
+            .expect_err("must fail before creating a CVM");
+            assert!(error.to_string().contains(expected), "{error:#}");
+            assert!(server
+                .received_requests()
+                .await
+                .expect("requests")
+                .iter()
+                .all(|request| request.method == "GET"));
+        }
+    }
+
     /// The invariant the guard exists for, preserved: `/miners/register`
     /// refreshes the oldest live worker, so a deploy aimed at a *live*
     /// secondary would overwrite worker #1. It must still be rejected — and
@@ -1483,7 +1558,6 @@ mod tests {
             image_tag: "v0.1.0".to_owned(),
             instance_type: "tdx.medium".to_owned(),
             disk_size: "40G".to_owned(),
-            os_image: "dstack-0.5.7".to_owned(),
             repo_root: None,
             version: None,
             boot_timeout_secs: 300,

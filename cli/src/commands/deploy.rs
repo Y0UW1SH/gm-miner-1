@@ -49,7 +49,6 @@ pub(crate) struct DeployArgs {
     pub(crate) image_tag: String,
     pub(crate) instance_type: String,
     pub(crate) disk_size: String,
-    pub(crate) os_image: String,
     pub(crate) repo_root: Option<std::path::PathBuf>,
     pub(crate) version: Option<usize>,
     pub(crate) boot_timeout_secs: u64,
@@ -109,7 +108,6 @@ pub(crate) fn deploy_args_from_flags(flags: DeployFlags) -> DeployArgs {
         image_tag: flags.image_tag,
         instance_type: flags.instance_type,
         disk_size: flags.disk_size,
-        os_image: flags.os_image,
         repo_root: flags.repo_root,
         version: flags.version,
         boot_timeout_secs: flags.boot_timeout_secs,
@@ -137,7 +135,7 @@ pub(crate) async fn cmd_deploy_subcommand(
         args.project_dir.clone(),
         args.instance_type.clone(),
         args.disk_size.clone(),
-        args.os_image.clone(),
+        gm_miner_cli::deploy::DEFAULT_OS_IMAGE.to_owned(),
     )
     .with_api_key(phala_api_key);
     let mut client = RegistryClient::new(cfg.clone());
@@ -607,6 +605,17 @@ pub(crate) async fn cmd_deploy(
              feature; select an image with cloud model binding or wait for this image to be admitted"
         );
     }
+    let target = resolve_and_render_target(cfg, args, approved.image_ref.as_deref())?;
+    // Reject incompatible templates/images before creating a billable CVM.
+    let expected = gm_miner_cli::deploy::DstackDeployResult {
+        compose_sha256: gm_miner_cli::compose_hash::compute_compose_hash(
+            &target.image_ref,
+            cfg.resolved_network(),
+        )?,
+        os_image_hash: gm_miner_cli::compose_hash::PINNED_OS_IMAGE_HASH.to_owned(),
+    };
+    verify_hashes(&expected, approved)
+        .context("bundled deployment template does not match the selected approval; no CVM was created. Use the matching gmcli release")?;
     let mut record = prepare_worker_record(
         cfg,
         args,
@@ -617,7 +626,6 @@ pub(crate) async fn cmd_deploy(
             backends: worker_backends,
         },
     )?;
-    let target = resolve_and_render_target(cfg, args, approved.image_ref.as_deref())?;
     println!("Resolved miner image: {}", target.image_ref);
     let registry_creds = resolve_registry_credentials(&target.image_ref).await?;
     println!(
