@@ -333,3 +333,12 @@ your registry predates the endpoint; nothing on your side to fix.
 If `gmcli sources` is not recognised at all, your CLI is older than v0.3.12.
 Run `gmcli update`, or re-run the installer from the
 [README](../README.md#quick-start).
+
+### DeepInfra native image transport
+
+The `deepinfra-native-images` image feature preserves native `/v1/inference/`
+paths to the fixed DeepInfra TLS host without proxy retries. GM performs model
+selection, request/response adaptation and pricing; the miner forwards the body
+unchanged using the selected credential slot. Native image offers require a
+newly built and approved image carrying this feature. Historical approved images
+are not relabelled. Ordinary DeepInfra chat retains the OpenAI path rewrite.

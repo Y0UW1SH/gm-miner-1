@@ -1040,3 +1040,81 @@ fn access_log_uses_only_authenticated_sanitized_correlation_metadata() {
         .exec()
         .expect("unauthenticated values stay out of logs");
 }
+
+#[test]
+fn deepinfra_native_inference_preserves_path_and_disables_replay() {
+    let (status, _, stderr, rendered) = render_envoy([("DEEPINFRA_API_KEY", "direct-key")]);
+    assert!(status.success(), "render failed: {stderr}");
+    let parsed = config(&rendered);
+    let path = "/v1/inference/black-forest-labs/FLUX-2-klein-4b";
+    let selected = route(&parsed, "deepinfra", path);
+    assert_eq!(selected["route"]["cluster"], "deepinfra");
+    assert_eq!(
+        selected["route"]["host_rewrite_literal"],
+        "api.deepinfra.com"
+    );
+    for field in [
+        "regex_rewrite",
+        "prefix_rewrite",
+        "retry_policy",
+        "hedge_policy",
+    ] {
+        assert!(selected["route"].get(field).is_none(), "unexpected {field}");
+    }
+    assert!(ingress(&parsed)["route_config"]["virtual_hosts"][0]
+        .get("retry_policy")
+        .is_none());
+    assert_tls(&parsed, "deepinfra", "api.deepinfra.com");
+    let slot =
+        gm_miner_cli::slots::derive_slot_id("deepinfra", "direct-key", "test-node-secret-0001")
+            .expect("DeepInfra slot");
+    for (node_key, expected_status) in [("test-node-secret-0001", None), ("wrong", Some("401"))] {
+        let lua = run_request(
+            &rendered,
+            &[
+                (":path", path),
+                ("x-gm-provider", "deepinfra"),
+                ("x-gm-node-key", node_key),
+                ("x-gm-upstream-slot", &slot),
+                ("authorization", "Bearer caller-key"),
+                ("x-envoy-retry-on", "5xx"),
+                ("x-envoy-retry-grpc-on", "unavailable"),
+                ("x-envoy-max-retries", "4"),
+                ("x-envoy-hedge-on-per-try-timeout", "true"),
+            ],
+            &[("GM_DEEPINFRA_KEY_SLOT_1", "direct-key")],
+        );
+        assert_eq!(
+            lua.globals()
+                .get::<Option<String>>("response_status")
+                .expect("status")
+                .as_deref(),
+            expected_status
+        );
+        if expected_status.is_none() {
+            let headers = lua
+                .globals()
+                .get::<mlua::Table>("input_headers")
+                .expect("headers");
+            assert_eq!(headers.get::<String>(":path").expect("path"), path);
+            assert_eq!(
+                headers.get::<String>("authorization").expect("auth"),
+                "Bearer direct-key"
+            );
+            for name in [
+                "x-envoy-retry-on",
+                "x-envoy-retry-grpc-on",
+                "x-envoy-max-retries",
+                "x-envoy-hedge-on-per-try-timeout",
+            ] {
+                assert!(
+                    headers
+                        .get::<Option<String>>(name)
+                        .expect("header")
+                        .is_none(),
+                    "{name}"
+                );
+            }
+        }
+    }
+}
