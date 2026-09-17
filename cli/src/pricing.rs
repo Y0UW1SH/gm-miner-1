@@ -296,7 +296,8 @@ pub fn effective_rate_summary(retail: &RetailDimensions, discount_bp: u32) -> St
         || summary.clone(),
         |price| format!("{} per image; {summary}", format_usd(price)),
     );
-    match extra_dimension_count(retail) {
+    let shown_image = usize::from(effective.output_per_image_ndollars.is_some());
+    match extra_dimension_count(retail) - shown_image {
         0 => summary,
         n => format!("{summary} (+{n} more)"),
     }
@@ -1107,7 +1108,7 @@ mod tests {
         // offer and never looks for the rest.
         assert_eq!(
             effective_rate_summary(&full_vector(), 1050),
-            "$0.013425006 per image; $2.685 in / $13.425 out per Mtok (+11 more)"
+            "$0.013425006 per image; $2.685 in / $13.425 out per Mtok (+10 more)"
         );
         let anchors_only = RetailDimensions {
             input_per_mtok_ndollars: 3_000_000_000,
