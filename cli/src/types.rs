@@ -162,11 +162,7 @@ pub struct ProductCapabilities {
 impl ProductCapabilities {
     #[must_use]
     pub fn generates_images(&self) -> bool {
-        self.image_generation
-            || matches!(
-                self.api.as_deref(),
-                Some("gemini_generate_content" | "openai_images")
-            )
+        self.image_generation || self.api.as_deref() == Some("openai_images")
     }
 }
 
@@ -216,6 +212,8 @@ pub struct RetailDimensions {
     pub image_input_per_mtok_ndollars: Option<u64>,
     #[serde(default)]
     pub image_output_per_mtok_ndollars: Option<u64>,
+    #[serde(default)]
+    pub output_per_image_ndollars: Option<u64>,
     #[serde(default)]
     pub cache_storage_per_mtok_hour_ndollars: Option<u64>,
     /// Input-token count above which the long-context tier applies. Not a

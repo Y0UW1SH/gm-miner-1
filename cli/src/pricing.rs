@@ -135,7 +135,7 @@ struct PriceDimension {
 /// `long_context_threshold_tokens` is deliberately absent: it is a token
 /// count, not a price, so discounting it would be nonsense — it rides through
 /// [`effective_dimensions`] untouched.
-const PRICE_DIMENSIONS: [PriceDimension; 12] = [
+const PRICE_DIMENSIONS: [PriceDimension; 13] = [
     PriceDimension {
         label: "input",
         anchor: true,
@@ -189,6 +189,12 @@ const PRICE_DIMENSIONS: [PriceDimension; 12] = [
         anchor: false,
         get: |d| d.image_output_per_mtok_ndollars,
         set: |d, v| d.image_output_per_mtok_ndollars = Some(v),
+    },
+    PriceDimension {
+        label: "per image",
+        anchor: false,
+        get: |d| d.output_per_image_ndollars,
+        set: |d, v| d.output_per_image_ndollars = Some(v),
     },
     PriceDimension {
         label: "cache storage/hr",
@@ -285,6 +291,10 @@ pub fn effective_rate_summary(retail: &RetailDimensions, discount_bp: u32) -> St
         "{} in / {} out per Mtok",
         format_usd(effective.input_per_mtok_ndollars),
         format_usd(effective.output_per_mtok_ndollars)
+    );
+    let summary = effective.output_per_image_ndollars.map_or_else(
+        || summary.clone(),
+        |price| format!("{} per image; {summary}", format_usd(price)),
     );
     match extra_dimension_count(retail) {
         0 => summary,
@@ -533,7 +543,7 @@ mod tests {
     };
     use crate::types::RetailDimensions;
 
-    /// A vector that prices every dimension, so a test can assert on all twelve at
+    /// A vector that prices every dimension, so a test can assert on all thirteen at
     /// once. The audio prices are deliberately not multiples of 10 000 — the
     /// floor has to bite somewhere.
     fn full_vector() -> RetailDimensions {
@@ -547,6 +557,7 @@ mod tests {
             audio_output_per_mtok_ndollars: Some(200_000_003),
             image_input_per_mtok_ndollars: Some(500_000_007),
             image_output_per_mtok_ndollars: Some(60_000_000_000),
+            output_per_image_ndollars: Some(15_000_007),
             cache_storage_per_mtok_hour_ndollars: Some(50_000_000),
             long_context_threshold_tokens: Some(200_000),
             long_context_input_per_mtok_ndollars: Some(6_000_000_000),
@@ -571,6 +582,7 @@ mod tests {
             ("audio_output", dims.audio_output_per_mtok_ndollars),
             ("image_input", dims.image_input_per_mtok_ndollars),
             ("image_output", dims.image_output_per_mtok_ndollars),
+            ("per_image", dims.output_per_image_ndollars),
             ("cache_storage", dims.cache_storage_per_mtok_hour_ndollars),
             (
                 "long_context_input",
@@ -1095,7 +1107,7 @@ mod tests {
         // offer and never looks for the rest.
         assert_eq!(
             effective_rate_summary(&full_vector(), 1050),
-            "$2.685 in / $13.425 out per Mtok (+10 more)"
+            "$0.013425006 per image; $2.685 in / $13.425 out per Mtok (+11 more)"
         );
         let anchors_only = RetailDimensions {
             input_per_mtok_ndollars: 3_000_000_000,
@@ -1148,5 +1160,19 @@ mod tests {
         let rendered = extra_dimension_lines(&dims, 1050).join("\n");
         assert!(rendered.contains("cache read"));
         assert!(!rendered.contains("long-ctx"), "{rendered}");
+    }
+    #[test]
+    fn per_image_catalog_price_is_discounted_and_shown_with_its_unit() {
+        let retail: RetailDimensions = serde_json::from_value(serde_json::json!({
+            "input_per_mtok_ndollars": 1_000_000_000_u64,
+            "output_per_mtok_ndollars": 1_000_000_000_u64,
+            "output_per_image_ndollars": 15_000_007
+        }))
+        .unwrap();
+        let summary = effective_rate_summary(&retail, 1050);
+        assert!(summary.contains("$0.013425006 per image"), "{summary}");
+        let lines = extra_dimension_lines(&retail, 1050).join("\n");
+        assert!(lines.contains("per image"), "{lines}");
+        assert!(lines.contains("$0.015000007 → $0.013425006"), "{lines}");
     }
 }

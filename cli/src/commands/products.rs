@@ -1830,6 +1830,7 @@ mod tests {
             audio_output_per_mtok_ndollars: Some(500),
             image_input_per_mtok_ndollars: Some(500),
             image_output_per_mtok_ndollars: Some(500),
+            output_per_image_ndollars: None,
             cache_storage_per_mtok_hour_ndollars: Some(500),
             long_context_threshold_tokens: Some(200_000),
             long_context_input_per_mtok_ndollars: Some(500),
