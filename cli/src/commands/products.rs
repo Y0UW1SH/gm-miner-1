@@ -263,8 +263,13 @@ fn declaration_lines(
     ];
     let extras = extra_dimension_lines(retail, discount_bp);
     if !extras.is_empty() {
+        let units = if retail.output_per_image_ndollars.is_some() {
+            "per Mtok unless labelled per image"
+        } else {
+            "per Mtok"
+        };
         lines.push(format!(
-            "  {:<width$}: {retail_label} → you receive, per Mtok",
+            "  {:<width$}: {retail_label} → you receive, {units}",
             "Also priced"
         ));
         lines.extend(extras);
@@ -881,7 +886,8 @@ fn extra_rate_lines(offers: &[ProductOfferStatus], retail_by_key: &RetailByKey<'
     }
     let mut out = vec![
         String::new(),
-        "Priced beyond input/output — retail → you receive, per Mtok:".to_owned(),
+        "Priced beyond input/output — retail → you receive, per Mtok unless labelled per image:"
+            .to_owned(),
     ];
     out.extend(lines);
     out
