@@ -670,6 +670,25 @@ static_resources:
                             - x-gm-provider
                             - x-gm-upstream-slot
 
+                        ## Native inference preserves its path and never replays a generation.
+                        - match:
+                            prefix: "/v1/inference/"
+                            headers:
+                              - name: "x-gm-provider"
+                                string_match:
+                                  exact: "deepinfra"
+                          route:
+                            cluster: deepinfra
+                            host_rewrite_literal: api.deepinfra.com
+                            timeout: 1800s
+                          request_headers_to_remove:
+                            - x-gm-request-id
+                            - x-gm-gateway-sig
+                            - x-gm-product
+                            - x-gm-node-key
+                            - x-gm-provider
+                            - x-gm-upstream-slot
+
                         ## ── DeepInfra ───────────────────────────────────────
                         ##  Enabled only when DEEPINFRA_API_KEY is set.
                         ##  DeepInfra's OpenAI-compatible surface lives under
@@ -1170,6 +1189,12 @@ static_resources:
                               "gm.access_log", "authenticated", true)
                             strip_inbound_auth(headers)
                             local provider = headers:get("x-gm-provider")
+                            if provider == "deepinfra" and bare:sub(1, 14) == "/v1/inference/" then
+                              headers:remove("x-envoy-retry-on")
+                              headers:remove("x-envoy-retry-grpc-on")
+                              headers:remove("x-envoy-max-retries")
+                              headers:remove("x-envoy-hedge-on-per-try-timeout")
+                            end
                             if provider ~= "near" or bare == "/v1/models" then
                               headers:remove("x-gm-upstream-model")
                             end

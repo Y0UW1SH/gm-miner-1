@@ -1259,12 +1259,12 @@ mod tests {
             catalog_row(
                 "gemini",
                 "gemini-3.1-flash-image",
-                serde_json::json!({"api": "gemini_generate_content", "image_output": true}),
+                serde_json::json!({"api": "gemini_generate_content", "image_generation": true, "image_output": true}),
             ),
             catalog_row(
                 "gemini",
                 "gemini-3.1-flash",
-                serde_json::json!({"image_input": true}),
+                serde_json::json!({"api": "gemini_generate_content", "image_generation": false, "image_input": true}),
             ),
             catalog_row("qwen", "qwen3.8-27b-tee", Value::Null),
         ];
