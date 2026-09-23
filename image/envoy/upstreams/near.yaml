@@ -1,0 +1,48 @@
+slots:
+  direct_env: NEAR_API_KEY
+  auth_header: authorization
+  auth_prefix: "Bearer "
+
+routes:
+  ##  This route terminates only at the co-located
+  ##  measured near-verify-proxy. The proxy owns the
+  ##  closed selector-to-host allowlist and attests the
+  ##  exact upstream TLS connection before forwarding.
+  ##  If the proxy is absent or rejects evidence, Envoy
+  ##  returns 502 and never falls back to cloud-api.
+  - match:
+      path: "/v1/models"
+      headers:
+        - name: "x-gm-provider"
+          string_match:
+            exact: "near"
+    route:
+      cluster: near_verify_proxy
+      timeout: 1800s
+  - match:
+      safe_regex:
+        google_re2: {}
+        regex: "^/v1/(chat/completions|images/generations)$"
+      headers:
+        - name: "x-gm-provider"
+          string_match:
+            exact: "near"
+    route:
+      cluster: near_verify_proxy
+      timeout: 1800s
+
+clusters:
+  ##  Loopback is deliberate: direct NEAR origins are never configured in
+  ##  Envoy, so there is no bypass around attestation policy.
+  - name: near_verify_proxy
+    type: STATIC
+    connect_timeout: 5s
+    load_assignment:
+      cluster_name: near_verify_proxy
+      endpoints:
+        - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address:
+                    address: 127.0.0.1
+                    port_value: 8082

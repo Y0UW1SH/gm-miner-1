@@ -1,0 +1,88 @@
+slots:
+  direct_env: OPENAI_API_KEY
+  cloud: true
+
+routes:
+  - match:
+      path: "/v1/chat/completions"
+      headers:
+        - name: x-gm-provider
+          string_match:
+            exact: "openai"
+    route:
+      cluster: openai
+      host_rewrite_literal: __GM_OPENAI_HOST__
+      regex_rewrite:
+        pattern:
+          google_re2: {}
+          regex: "^/v1/chat/completions$"
+        substitution: "/openai/v1/chat/completions"
+      timeout: 1800s
+    request_headers_to_remove:
+      - authorization
+      - x-api-key
+      - api-key
+      - x-goog-api-key
+    request_headers_to_add:
+      - header:
+          key: api-key
+          value: "%ENVIRONMENT(GM_OPENAI_KEY_SLOT_1)%"
+        append_action: OVERWRITE_IF_EXISTS_OR_ADD
+  ##  The live response.created/non-streaming echo is the
+  ##  deployment name (`gm-echo-test`), not the model.
+  ##  Keep this explicit JSON 400 before the generic
+  ##  OpenAI route so an Azure Responses request cannot
+  ##  reach an unqualified response surface.
+  - match:
+      path: "/v1/responses"
+      headers:
+        - name: "x-gm-provider"
+          string_match:
+            exact: "openai"
+    direct_response:
+      status: 400
+      body:
+        inline_string: '{"error":{"type":"gm_unqualified_surface","message":"Azure OpenAI Responses is unqualified: the response model echo is the deployment name, not the upstream model"}}'
+    response_headers_to_add:
+      - header:
+          key: content-type
+          value: application/json
+        append_action: OVERWRITE_IF_EXISTS_OR_ADD
+    request_headers_to_remove:
+      - authorization
+      - api-key
+      - x-api-key
+clusters:
+  - name: openai
+    type: LOGICAL_DNS
+    connect_timeout: 10s
+    dns_lookup_family: V4_ONLY
+    typed_extension_protocol_options:
+      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+        explicit_http_config:
+          http2_protocol_options: {}
+    load_assignment:
+      cluster_name: openai
+      endpoints:
+        - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address:
+                    address: __GM_OPENAI_HOST__
+                    port_value: 443
+    transport_socket:
+      name: envoy.transport_sockets.tls
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+        sni: __GM_OPENAI_HOST__
+        common_tls_context:
+          validation_context:
+            trusted_ca:
+              filename: /etc/ssl/certs/ca-certificates.crt
+            # Azure serves wildcard DNS SANs. Match the configured Azure suffix;
+            # ARM binds the configured host to the account; this matcher checks its suffix.
+            match_typed_subject_alt_names:
+              - san_type: DNS
+                matcher:
+                  suffix: __GM_OPENAI_SAN_SUFFIX__

@@ -1,0 +1,44 @@
+routes:
+  ##  A plain proxy to the synthetic benchmark upstream: no API key, no
+  ##  upstream auth header, and no retry (it would distort the measurement).
+  ##  start.sh picks the host from GM_NETWORK.
+  - match:
+      prefix: "/"
+      headers:
+        - name: "x-gm-provider"
+          string_match:
+            exact: "benchmark"
+    route:
+      cluster: benchmark
+      host_rewrite_literal: __GM_BENCHMARK_HOST__
+      timeout: 1800s
+    request_headers_to_remove:
+      - authorization
+
+clusters:
+  - name: benchmark
+    type: LOGICAL_DNS
+    connect_timeout: 10s
+    dns_lookup_family: V4_ONLY
+    load_assignment:
+      cluster_name: benchmark
+      endpoints:
+        - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address:
+                    address: __GM_BENCHMARK_HOST__
+                    port_value: 443
+    transport_socket:
+      name: envoy.transport_sockets.tls
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+        sni: __GM_BENCHMARK_HOST__
+        common_tls_context:
+          validation_context:
+            trusted_ca:
+              filename: /etc/ssl/certs/ca-certificates.crt
+            match_typed_subject_alt_names:
+              - san_type: DNS
+                matcher:
+                  exact: __GM_BENCHMARK_HOST__

@@ -7,7 +7,7 @@
 //!
 //! This endpoint is public by contract — no node-secret auth. Envoy
 //! routes this one path to the attestation server and skips its
-//! inbound `x-gm-node-key` filter for it (see `image/envoy.yaml`);
+//! inbound `x-gm-node-key` filter for it (see `image/envoy/base.yaml`);
 //! the registry probes it without that header.
 
 use std::sync::Arc;

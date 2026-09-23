@@ -74,9 +74,9 @@ percent-encoding = "=2.3.2"
 hmac         = "=0.13.0"
 strum        = { version = "0.28", features = ["derive"] }
 subxt        = "0.44.3"
+serde_yaml_ng = "0.10"
 
 [dev-dependencies]
-serde_yaml_ng = "0.10"
 regex         = "1.12"
 wiremock     = "0.6"
 tokio        = { workspace = true }

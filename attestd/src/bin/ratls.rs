@@ -13,7 +13,7 @@
 //! verifies that binding when it opens a TLS connection to the miner.
 //! See `gm_miner_attestd::ratls` for the full format description.
 //!
-//! The output paths are fixed: Envoy's `image/envoy.yaml` hard-codes
+//! The output paths are fixed: Envoy's `image/envoy/base.yaml` hard-codes
 //! `/tmp/gm-ratls/{cert,key}.pem`, and that config is part of the
 //! attestation-measured image, so the paths are not operator-tunable —
 //! they are a build-time contract between this binary and Envoy.
@@ -35,9 +35,9 @@ use gm_miner_attestd::{provision_ratls, validate_miner_id, RatlsPaths};
 /// Default identity slug when `GM_MINER_ID` is unset. Matches the
 /// attestation server's default so both name the miner identically.
 const DEFAULT_MINER_ID: &str = "gm-miner";
-/// PEM private-key output path. Must match `image/envoy.yaml`.
+/// PEM private-key output path. Must match `image/envoy/base.yaml`.
 const KEY_PATH: &str = "/tmp/gm-ratls/key.pem";
-/// PEM certificate-chain output path. Must match `image/envoy.yaml`.
+/// PEM certificate-chain output path. Must match `image/envoy/base.yaml`.
 const CERT_PATH: &str = "/tmp/gm-ratls/cert.pem";
 
 #[tokio::main]

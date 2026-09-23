@@ -1,0 +1,72 @@
+slots:
+  direct_env: DEEPINFRA_API_KEY
+  auth_header: authorization
+  auth_prefix: "Bearer "
+
+routes:
+  ## Native inference preserves its path and never replays a generation.
+  - match:
+      prefix: "/v1/inference/"
+      headers:
+        - name: "x-gm-provider"
+          string_match:
+            exact: "deepinfra"
+    route:
+      cluster: deepinfra
+      host_rewrite_literal: api.deepinfra.com
+      timeout: 1800s
+
+  ##  DeepInfra's OpenAI-compatible surface lives under
+  ##  /v1/openai (not /v1), so the inbound /v1/... path is
+  ##  rewritten to /v1/openai/... before it leaves.
+  - match:
+      prefix: "/"
+      headers:
+        - name: "x-gm-provider"
+          string_match:
+            exact: "deepinfra"
+    route:
+      cluster: deepinfra
+      host_rewrite_literal: api.deepinfra.com
+      regex_rewrite:
+        pattern:
+          google_re2: {}
+          regex: "^/v1/(.*)$"
+        substitution: "/v1/openai/\\1"
+      timeout: 1800s
+      retry_policy:
+        retry_on: "reset,connect-failure,refused-stream,5xx"
+        num_retries: 1
+
+clusters:
+  - name: deepinfra
+    type: LOGICAL_DNS
+    connect_timeout: 10s
+    dns_lookup_family: V4_ONLY
+    typed_extension_protocol_options:
+      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+        explicit_http_config:
+          http_protocol_options: {}
+    load_assignment:
+      cluster_name: deepinfra
+      endpoints:
+        - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address:
+                    address: api.deepinfra.com
+                    port_value: 443
+    transport_socket:
+      name: envoy.transport_sockets.tls
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+        sni: api.deepinfra.com
+        common_tls_context:
+          validation_context:
+            trusted_ca:
+              filename: /etc/ssl/certs/ca-certificates.crt
+            match_typed_subject_alt_names:
+              - san_type: DNS
+                matcher:
+                  exact: api.deepinfra.com

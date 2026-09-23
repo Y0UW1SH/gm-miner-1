@@ -1,0 +1,66 @@
+slots:
+  direct_env: ANTHROPIC_API_KEY
+  cloud: true
+
+routes:
+  - match:
+      path: "/v1/messages"
+      headers:
+        - name: x-gm-provider
+          string_match:
+            exact: "anthropic"
+    route:
+      cluster: anthropic
+      host_rewrite_literal: __GM_ANTHROPIC_HOST__
+      regex_rewrite:
+        pattern:
+          google_re2: {}
+          regex: "^/v1/messages$"
+        substitution: "/anthropic/v1/messages"
+      timeout: 1800s
+    request_headers_to_remove:
+      - authorization
+      - x-api-key
+      - api-key
+      - x-goog-api-key
+    request_headers_to_add:
+      - header:
+          key: x-api-key
+          value: "%ENVIRONMENT(GM_ANTHROPIC_KEY_SLOT_1)%"
+        append_action: OVERWRITE_IF_EXISTS_OR_ADD
+      - header:
+          key: anthropic-version
+          value: "2023-06-01"
+        append_action: OVERWRITE_IF_EXISTS_OR_ADD
+clusters:
+  - name: anthropic
+    type: LOGICAL_DNS
+    connect_timeout: 10s
+    dns_lookup_family: V4_ONLY
+    typed_extension_protocol_options:
+      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+        explicit_http_config:
+          http2_protocol_options: {}
+    load_assignment:
+      cluster_name: anthropic
+      endpoints:
+        - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address:
+                    address: __GM_ANTHROPIC_HOST__
+                    port_value: 443
+    transport_socket:
+      name: envoy.transport_sockets.tls
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+        sni: __GM_ANTHROPIC_HOST__
+        common_tls_context:
+          validation_context:
+            trusted_ca:
+              filename: /etc/ssl/certs/ca-certificates.crt
+            match_typed_subject_alt_names:
+              - san_type: DNS
+                matcher:
+                  suffix: .services.ai.azure.com

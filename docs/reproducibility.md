@@ -22,7 +22,7 @@ compose-hash at boot and binds it to the attestation quote.
 | Envoy base image | Yes | Pinned by `@sha256:…` digest |
 | Rust builder base | Yes | Pinned by `@sha256:…` digest |
 | Rust binaries: `gmcli`, `gm-miner-attestd`, `gm-miner-ratls` | Yes, given same toolchain | `RUSTFLAGS="-C codegen-units=1 -C debuginfo=0"`, `CARGO_INCREMENTAL=0`, `SOURCE_DATE_EPOCH` set |
-| `envoy.yaml` | Yes | Static config, version-controlled |
+| `image/envoy/` templates | Yes | Static config, version-controlled; rendered at start by `gmcli render-envoy` |
 | `start.sh` | Yes | Static script, version-controlled |
 
 ## Sources of remaining non-determinism

@@ -10,6 +10,7 @@ pub mod config;
 pub mod dependency;
 pub mod deploy;
 pub mod earnings;
+pub mod envoy_render;
 pub mod image;
 pub mod image_version;
 pub mod network;

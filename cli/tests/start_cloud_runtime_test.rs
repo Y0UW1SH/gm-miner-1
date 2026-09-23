@@ -84,7 +84,7 @@ fn entrypoint_command(root: &Path, markers: &Path) -> Command {
         )
         .env("MARKERS", markers)
         .env("GM_NETWORK", "testnet")
-        .env("GM_ENVOY_TEMPLATE_PATH", root.join("image/envoy.yaml"))
+        .env("GM_ENVOY_TEMPLATE_DIR", root.join("image/envoy"))
         .env("GM_RENDERED_CONFIG", markers.join("envoy.yaml"))
         .env("GMCLI_BIN", env!("CARGO_BIN_EXE_gmcli"))
         .env("GM_NODE_SECRET", "test-node-secret-0001")

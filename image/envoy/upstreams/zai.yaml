@@ -1,0 +1,57 @@
+slots:
+  direct_env: ZAI_API_KEY
+  auth_header: authorization
+  auth_prefix: "Bearer "
+
+routes:
+  - match:
+      prefix: "/"
+      headers:
+        - name: "x-gm-provider"
+          string_match:
+            exact: "zai"
+    route:
+      cluster: zai
+      host_rewrite_literal: api.z.ai
+      regex_rewrite:
+        pattern:
+          google_re2: {}
+          regex: "^/v1/(.*)$"
+        substitution: "/api/paas/v4/\\1"
+      timeout: 1800s
+      retry_policy:
+        retry_on: "reset,connect-failure,refused-stream,5xx"
+        num_retries: 1
+
+clusters:
+  - name: zai
+    type: LOGICAL_DNS
+    connect_timeout: 10s
+    dns_lookup_family: V4_ONLY
+    typed_extension_protocol_options:
+      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+        explicit_http_config:
+          http2_protocol_options: {}
+    load_assignment:
+      cluster_name: zai
+      endpoints:
+        - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address:
+                    address: api.z.ai
+                    port_value: 443
+    transport_socket:
+      name: envoy.transport_sockets.tls
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+        sni: api.z.ai
+        common_tls_context:
+          validation_context:
+            trusted_ca:
+              filename: /etc/ssl/certs/ca-certificates.crt
+            match_typed_subject_alt_names:
+              - san_type: DNS
+                matcher:
+                  exact: api.z.ai

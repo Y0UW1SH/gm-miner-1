@@ -33,7 +33,7 @@ where
         .env("PATH", "/bin:/usr/bin:/usr/local/bin")
         .env("GM_START_RENDER_ONLY", "1")
         .env("GMCLI_BIN", env!("CARGO_BIN_EXE_gmcli"))
-        .env("GM_ENVOY_TEMPLATE_PATH", root.join("image/envoy.yaml"))
+        .env("GM_ENVOY_TEMPLATE_DIR", root.join("image/envoy"))
         .env("GM_RENDERED_CONFIG", out.path())
         .env("GM_NETWORK", "testnet")
         .env("GM_NODE_SECRET", "test-node-secret-0001")
@@ -475,7 +475,8 @@ fn direct_keys_select_hmac_slots_replace_credentials_and_reject_retired_slots() 
 
 #[test]
 fn token_shaped_node_secret_authenticates_as_an_inert_literal() {
-    let secret = "__GM_ANTHROPIC_DEFAULT_SLOT_ENV__";
+    // A live token: a renderer that rescanned inserted values would expand it.
+    let secret = "__GM_SLOT_CONFIG__";
     let (status, _, stderr, rendered) = render_envoy([
         ("GM_NODE_SECRET", secret),
         ("ANTHROPIC_API_KEY", "direct-key"),

@@ -47,7 +47,7 @@ render() {
   env -i PATH="${PATH}" \
     GM_START_RENDER_ONLY=1 \
     GMCLI_BIN="${GMCLI_BIN}" \
-    GM_ENVOY_TEMPLATE_PATH="${ROOT}/image/envoy.yaml" \
+    GM_ENVOY_TEMPLATE_DIR="${ROOT}/image/envoy" \
     GM_RENDERED_CONFIG="${WORK}/configs/${name}.yaml" \
     "$@" \
     bash "${ROOT}/image/start.sh" >"${WORK}/${name}.render.log" 2>&1 || {
