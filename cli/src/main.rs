@@ -41,8 +41,9 @@
 mod commands;
 
 use std::io::IsTerminal as _;
+use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use chrono::Timelike as _;
 use clap::{Parser, Subcommand};
 use gm_miner_cli::{
@@ -240,6 +241,22 @@ enum Command {
         /// Name of the environment variable holding the semicolon-separated keys.
         #[arg(long = "env-var")]
         env_var: String,
+    },
+
+    /// Render the Envoy config from the base template and upstream files.
+    #[command(hide = true)]
+    RenderEnvoy {
+        /// Directory holding base.yaml and upstreams/.
+        #[arg(long)]
+        template_dir: PathBuf,
+
+        /// Where to write the rendered config.
+        #[arg(long)]
+        out: PathBuf,
+
+        /// Variant for a provider that ships variant files, as provider=variant.
+        #[arg(long = "select", value_parser = parse_selection)]
+        select: Vec<(String, String)>,
     },
 
     /// Alias for `status` — the product table is folded into `status`.
@@ -804,6 +821,11 @@ async fn dispatch(cli: Cli) -> Result<()> {
             cmd_publish_image_version(&context.config()?, *flags).await
         }
         Command::SlotEnv { provider, env_var } => cmd_slot_env(&provider, &env_var),
+        Command::RenderEnvoy {
+            template_dir,
+            out,
+            select,
+        } => cmd_render_envoy(&template_dir, &out, select),
         Command::ListProducts | Command::Status => cmd_status(&mut context.client().await?).await,
         Command::Pricing => cmd_pricing(&mut context.client().await?).await,
         Command::Sources => cmd_sources(&mut context.client().await?).await,
@@ -867,6 +889,21 @@ fn cmd_slot_env(provider: &Provider, env_var: &str) -> Result<()> {
         gm_miner_cli::slots::render_slot_env_exports(provider.as_str(), &raw, &node_secret)?
     );
     Ok(())
+}
+
+fn parse_selection(raw: &str) -> Result<(String, String), String> {
+    raw.split_once('=')
+        .filter(|(provider, variant)| !provider.is_empty() && !variant.is_empty())
+        .map(|(provider, variant)| (provider.to_owned(), variant.to_owned()))
+        .ok_or_else(|| format!("expected provider=variant, got '{raw}'"))
+}
+
+fn cmd_render_envoy(template_dir: &Path, out: &Path, select: Vec<(String, String)>) -> Result<()> {
+    let selections = select.into_iter().collect();
+    let rendered = gm_miner_cli::envoy_render::render(template_dir, &selections, &|name| {
+        std::env::var(name).ok()
+    })?;
+    std::fs::write(out, rendered).with_context(|| format!("write {}", out.display()))
 }
 
 /// Route the `worker` subcommands. Each loads config, refreshes the token,

@@ -1,0 +1,72 @@
+slots:
+  direct_env: KUBETEE_API_KEY
+  auth_header: authorization
+  auth_prefix: "Bearer "
+
+routes:
+  ##  llm.kubetee.ai serves the OpenAI-compatible surface
+  ##  under /v1 itself, so no path rewrite is needed.
+  ##  Image generation is paid and non-idempotent; never
+  ##  retry it after an upstream reset or 5xx.
+  - match:
+      path: "/v1/images/generations"
+      headers:
+        - name: "x-gm-provider"
+          string_match:
+            exact: "kubetee"
+    route:
+      cluster: kubetee
+      host_rewrite_literal: llm.kubetee.ai
+      timeout: 1800s
+  - match:
+      prefix: "/"
+      headers:
+        - name: "x-gm-provider"
+          string_match:
+            exact: "kubetee"
+    route:
+      cluster: kubetee
+      host_rewrite_literal: llm.kubetee.ai
+      timeout: 1800s
+      retry_policy:
+        retry_on: "reset,connect-failure,refused-stream,5xx"
+        num_retries: 1
+
+clusters:
+  ##  TLS 1.3 is mandatory for KubeTEE (security). Envoy clients default
+  ##  to tls_maximum_protocol_version TLSv1_2; without this pin the
+  ##  ClientHello has no supported_versions and llm.kubetee.ai rejects it.
+  - name: kubetee
+    type: LOGICAL_DNS
+    connect_timeout: 10s
+    dns_lookup_family: V4_ONLY
+    typed_extension_protocol_options:
+      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+        explicit_http_config:
+          http2_protocol_options: {}
+    load_assignment:
+      cluster_name: kubetee
+      endpoints:
+        - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address:
+                    address: llm.kubetee.ai
+                    port_value: 443
+    transport_socket:
+      name: envoy.transport_sockets.tls
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+        sni: llm.kubetee.ai
+        common_tls_context:
+          tls_params:
+            tls_minimum_protocol_version: TLSv1_3
+            tls_maximum_protocol_version: TLSv1_3
+          validation_context:
+            trusted_ca:
+              filename: /etc/ssl/certs/ca-certificates.crt
+            match_typed_subject_alt_names:
+              - san_type: DNS
+                matcher:
+                  exact: llm.kubetee.ai

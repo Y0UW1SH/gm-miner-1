@@ -28,7 +28,7 @@
 # corresponding env var is absent envoy injects an empty key and the
 # upstream returns 401; the registry's probe surfaces that as a
 # capability failure for the affected provider. The 501 fallback in
-# envoy.yaml fires only when no provider header arrives.
+# image/envoy/base.yaml fires only when no provider header arrives.
 #
 # Benchmark route: the `x-gm-provider: benchmark` route proxies to the
 # benchmark upstream URL keyed off GM_NETWORK below. Both the testnet
@@ -36,7 +36,7 @@
 # be redirected by editing an env var — only by editing this script,
 # which moves the compose_hash and is rejected by the registry's
 # attestation enforcement. The rendering step substitutes the resolved
-# URL's host/port into envoy.yaml.
+# host into the benchmark upstream file.
 #
 # Process supervision: required servers run in the background; this script
 # stays PID 1 and watches all of them. When any exits the
@@ -52,57 +52,6 @@ log() { printf '[start] %s\n' "$*" >&2; }
 
 lowercase() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
-}
-
-lua_string() {
-  local value="$1"
-  value="${value//\\/\\\\}"
-  value="${value//\"/\\\"}"
-  printf '"%s"' "${value}"
-}
-
-lua_bool() {
-  if [[ "$1" == "1" ]]; then
-    printf 'true'
-  else
-    printf 'false'
-  fi
-}
-
-lua_slot_map() {
-  local ids="$1"
-  local prefix="$2"
-  if [[ -z "${ids}" ]]; then
-    printf '{}'
-    return
-  fi
-
-  local -a slot_ids
-  local IFS=';'
-  read -r -a slot_ids <<<"${ids}"
-
-  local out="{"
-  local idx=1
-  local slot_id
-  for slot_id in "${slot_ids[@]}"; do
-    if [[ "${idx}" -gt 1 ]]; then
-      out+=", "
-    fi
-    out+="[$(lua_string "${slot_id}")]=$(lua_string "${prefix}_KEY_SLOT_${idx}")"
-    idx=$((idx + 1))
-  done
-  out+="}"
-  printf '%s' "${out}"
-}
-
-lua_default_slot_env() {
-  local ids="$1"
-  local prefix="$2"
-  if [[ -z "${ids}" ]]; then
-    printf 'nil'
-  else
-    lua_string "${prefix}_KEY_SLOT_1"
-  fi
 }
 
 fan_out_slots() {
@@ -233,13 +182,6 @@ parse_azure_host() {
 
 # ── Resolve provider upstream selectors ───────────────────────────────
 ANTHROPIC_HOST=api.anthropic.com
-ANTHROPIC_PORT=443
-ANTHROPIC_VERSION_APPEND_ACTION=ADD_IF_ABSENT
-ANTHROPIC_SAN_MATCH=exact
-ANTHROPIC_SAN_VALUE="${ANTHROPIC_HOST}"
-ANTHROPIC_CLOUD=0
-ANTHROPIC_FOUNDRY=0
-ANTHROPIC_BEDROCK_UNQUALIFIED=0
 AZURE_ENABLED=0
 
 case "${ANTHROPIC_UPSTREAM}" in
@@ -267,15 +209,9 @@ case "${ANTHROPIC_UPSTREAM}" in
         exit 1
         ;;
     esac
-    ANTHROPIC_VERSION_APPEND_ACTION=OVERWRITE_IF_EXISTS_OR_ADD
-    ANTHROPIC_SAN_MATCH=exact
-    # Bedrock's route constructs this exact Mantle hostname from the bounded
-    # region; suffix matching would also admit unrelated *.api.aws certs.
-    # Bedrock remains cloud provenance for the Lua fence, but inference is
-    # rejected inside the image because it has no qualified model echo.
-    ANTHROPIC_SAN_VALUE="${ANTHROPIC_HOST}"
-    ANTHROPIC_CLOUD=1
-    ANTHROPIC_BEDROCK_UNQUALIFIED=1
+    # anthropic.bedrock.yaml matches this exact Mantle host's SAN; a suffix
+    # match would also admit unrelated *.api.aws certs. Inference is refused
+    # inside the image because Bedrock has no qualified model echo.
     ;;
   foundry)
     ## Microsoft Foundry serves Claude on an Anthropic-native passthrough:
@@ -295,11 +231,6 @@ case "${ANTHROPIC_UPSTREAM}" in
     ANTHROPIC_HOST="$(parse_azure_host AZURE_FOUNDRY_ENDPOINT "${AZURE_FOUNDRY_ENDPOINT}")"
     validate_hostname "Microsoft Foundry" "${ANTHROPIC_HOST}"
     require_host_suffix "Microsoft Foundry" "${ANTHROPIC_HOST}" services.ai.azure.com
-    ANTHROPIC_VERSION_APPEND_ACTION=OVERWRITE_IF_EXISTS_OR_ADD
-    ANTHROPIC_SAN_MATCH=suffix
-    ANTHROPIC_SAN_VALUE=.services.ai.azure.com
-    ANTHROPIC_CLOUD=1
-    ANTHROPIC_FOUNDRY=1
     AZURE_ENABLED=1
     ;;
   *)
@@ -309,11 +240,7 @@ case "${ANTHROPIC_UPSTREAM}" in
 esac
 
 OPENAI_HOST=api.openai.com
-OPENAI_PORT=443
-OPENAI_SAN_MATCH=exact
-OPENAI_SAN_VALUE="${OPENAI_HOST}"
-OPENAI_AZURE_TLS=0
-OPENAI_CLOUD=0
+OPENAI_SAN_SUFFIX=
 
 case "${OPENAI_UPSTREAM}" in
   direct) ;;
@@ -337,10 +264,7 @@ case "${OPENAI_UPSTREAM}" in
       openai.azure.com \
       services.ai.azure.com \
       cognitiveservices.azure.com)"
-    OPENAI_SAN_MATCH=suffix
-    OPENAI_SAN_VALUE=".${AZURE_OPENAI_SUFFIX}"
-    OPENAI_AZURE_TLS=1
-    OPENAI_CLOUD=1
+    OPENAI_SAN_SUFFIX=".${AZURE_OPENAI_SUFFIX}"
     AZURE_ENABLED=1
     ;;
   *)
@@ -463,79 +387,24 @@ if [[ "${OPENAI_UPSTREAM}" == "azure" && -n "${AZURE_OPENAI_API_KEY:-}" ]]; then
   fan_out_slots openai AZURE_OPENAI_API_KEY
 fi
 
-GM_ANTHROPIC_SLOT_MAP="$(lua_slot_map "${GM_ANTHROPIC_SLOT_IDS:-}" "GM_ANTHROPIC")"
-GM_ANTHROPIC_DEFAULT_SLOT_ENV="$(lua_default_slot_env "${GM_ANTHROPIC_SLOT_IDS:-}" "GM_ANTHROPIC")"
-GM_OPENAI_SLOT_MAP="$(lua_slot_map "${GM_OPENAI_SLOT_IDS:-}" "GM_OPENAI")"
-GM_OPENAI_DEFAULT_SLOT_ENV="$(lua_default_slot_env "${GM_OPENAI_SLOT_IDS:-}" "GM_OPENAI")"
-GM_GEMINI_SLOT_MAP="$(lua_slot_map "${GM_GEMINI_SLOT_IDS:-}" "GM_GEMINI")"
-GM_GEMINI_DEFAULT_SLOT_ENV="$(lua_default_slot_env "${GM_GEMINI_SLOT_IDS:-}" "GM_GEMINI")"
-GM_CHUTES_SLOT_MAP="$(lua_slot_map "${GM_CHUTES_SLOT_IDS:-}" "GM_CHUTES")"
-GM_CHUTES_DEFAULT_SLOT_ENV="$(lua_default_slot_env "${GM_CHUTES_SLOT_IDS:-}" "GM_CHUTES")"
-GM_ZAI_SLOT_MAP="$(lua_slot_map "${GM_ZAI_SLOT_IDS:-}" "GM_ZAI")"
-GM_ZAI_DEFAULT_SLOT_ENV="$(lua_default_slot_env "${GM_ZAI_SLOT_IDS:-}" "GM_ZAI")"
-GM_MOONSHOT_SLOT_MAP="$(lua_slot_map "${GM_MOONSHOT_SLOT_IDS:-}" "GM_MOONSHOT")"
-GM_MOONSHOT_DEFAULT_SLOT_ENV="$(lua_default_slot_env "${GM_MOONSHOT_SLOT_IDS:-}" "GM_MOONSHOT")"
-GM_DEEPINFRA_SLOT_MAP="$(lua_slot_map "${GM_DEEPINFRA_SLOT_IDS:-}" "GM_DEEPINFRA")"
-GM_DEEPINFRA_DEFAULT_SLOT_ENV="$(lua_default_slot_env "${GM_DEEPINFRA_SLOT_IDS:-}" "GM_DEEPINFRA")"
-GM_KUBETEE_SLOT_MAP="$(lua_slot_map "${GM_KUBETEE_SLOT_IDS:-}" "GM_KUBETEE")"
-GM_KUBETEE_DEFAULT_SLOT_ENV="$(lua_default_slot_env "${GM_KUBETEE_SLOT_IDS:-}" "GM_KUBETEE")"
-GM_ENGY_SLOT_MAP="$(lua_slot_map "${GM_ENGY_SLOT_IDS:-}" "GM_ENGY")"
-GM_ENGY_DEFAULT_SLOT_ENV="$(lua_default_slot_env "${GM_ENGY_SLOT_IDS:-}" "GM_ENGY")"
-GM_MOONMATH_SLOT_MAP="$(lua_slot_map "${GM_MOONMATH_SLOT_IDS:-}" "GM_MOONMATH")"
-GM_MOONMATH_DEFAULT_SLOT_ENV="$(lua_default_slot_env "${GM_MOONMATH_SLOT_IDS:-}" "GM_MOONMATH")"
-GM_NEAR_SLOT_MAP="$(lua_slot_map "${GM_NEAR_SLOT_IDS:-}" "GM_NEAR")"
-GM_NEAR_DEFAULT_SLOT_ENV="$(lua_default_slot_env "${GM_NEAR_SLOT_IDS:-}" "GM_NEAR")"
-
 # ── Resolve the benchmark upstream ────────────────────────────────────
-# The benchmark URL is hardcoded per network in this script, NOT taken
+# The benchmark host is hardcoded per network in this script, NOT taken
 # from a runtime env var: a miner cannot redirect the `x-gm-provider:
 # benchmark` route to a colluding service without editing this file,
 # which moves the compose_hash and is rejected by the registry's
 # attestation enforcement. GM_NETWORK is set by `gmcli deploy` as a
 # rendered literal in dstack/docker-compose.yaml — part of the
 # attestation-measured compose source — so its value is fixed at deploy
-# time and equally tamper-evident.
-#
-# Envoy clusters take a host and a port, not a URL: the literal URL
-# below is split into BENCHMARK_HOST / BENCHMARK_PORT / BENCHMARK_TLS,
-# then substituted into envoy.yaml's benchmark cluster. The scheme
-# decides both the default port (443 for https, 80 for http) and
-# whether the cluster carries an upstream TLS context — envoy.yaml's
-# `gm:benchmark-tls` sentinel block is kept when the URL is https and
-# dropped when it is http.
+# time and equally tamper-evident. image/envoy/upstreams/benchmark.yaml
+# reaches it over TLS on 443.
 case "${GM_NETWORK:?GM_NETWORK must be set (rendered into dstack/docker-compose.yaml by gmcli deploy)}" in
-  testnet) BENCHMARK_URL="https://test-benchmark.saygm.com" ;;
-  mainnet) BENCHMARK_URL="https://benchmark.saygm.com" ;;
+  testnet) BENCHMARK_HOST=test-benchmark.saygm.com ;;
+  mainnet) BENCHMARK_HOST=benchmark.saygm.com ;;
   *)
     log "error: unknown GM_NETWORK '${GM_NETWORK}' (want testnet or mainnet)"
     exit 1
     ;;
 esac
-
-case "${BENCHMARK_URL}" in
-  https://*)
-    BENCHMARK_TLS=1
-    benchmark_default_port=443
-    ;;
-  http://*)
-    BENCHMARK_TLS=0
-    benchmark_default_port=80
-    ;;
-  *)
-    log "error: BENCHMARK_URL must start with http:// or https:// (got '${BENCHMARK_URL}')"
-    exit 1
-    ;;
-esac
-
-benchmark_authority="${BENCHMARK_URL#*://}"
-benchmark_authority="${benchmark_authority%%/*}"
-if [[ "${benchmark_authority}" == *:* ]]; then
-  BENCHMARK_HOST="${benchmark_authority%:*}"
-  BENCHMARK_PORT="${benchmark_authority##*:}"
-else
-  BENCHMARK_HOST="${benchmark_authority}"
-  BENCHMARK_PORT="${benchmark_default_port}"
-fi
 
 # ── Gate Azure data-plane startup ─────────────────────────────────────
 # Render-only mode is an offline config check and never starts Envoy. On
@@ -550,187 +419,25 @@ if [[ "${GM_START_RENDER_ONLY:-}" != "1" ]] &&
 fi
 
 # ── Render the envoy config ───────────────────────────────────────────
-# Literal token replaces (awk index/substr, not gsub) so values with
-# regex- or replacement-special characters are handled verbatim. The
-# rendered config goes to a writable path; the baked-in
-# /etc/envoy/envoy.yaml stays untouched.
-#
-#   1. The node secret. Envoy's inbound Lua filter enforces x-gm-node-key
-#      against a config literal. Provider slot maps render as slot ids and
-#      per-slot env var names only; key values stay in the Envoy process
-#      environment and Lua reads them with os.getenv at request time.
-#   2. The benchmark cluster's host and port — resolved above from the
-#      hardcoded per-network URL.
-#   3. The benchmark cluster's upstream TLS block, delimited by
-#      `## gm:benchmark-tls-begin` / `-end` whole-line sentinels. Kept
-#      when the URL is https; dropped (the cluster stays plain HTTP/1.1)
-#      when it is http.
+# gmcli render-envoy assembles image/envoy/base.yaml and the selected
+# upstream files (see image/envoy/README.md). It reads the GM_* variables
+# below plus the GM_<PROVIDER>_SLOT_IDS that fan_out_slots exported, and
+# fails on any token it cannot fill. The node secret is rendered raw into
+# a Lua string literal; that is injection-safe only because
+# validate_node_secret already rejected any quote, backslash or newline.
+# The rendered config goes to a writable path; the baked-in templates
+# stay untouched.
 RENDERED_CONFIG="${GM_RENDERED_CONFIG:-/tmp/envoy.rendered.yaml}"
 GM_NODE_SECRET="${GM_NODE_SECRET:-}" \
   GM_BENCHMARK_HOST="${BENCHMARK_HOST}" \
-  GM_BENCHMARK_PORT="${BENCHMARK_PORT}" \
-  GM_BENCHMARK_TLS="${BENCHMARK_TLS}" \
   GM_ANTHROPIC_HOST="${ANTHROPIC_HOST}" \
-  GM_ANTHROPIC_PORT="${ANTHROPIC_PORT}" \
-  GM_ANTHROPIC_VERSION_APPEND_ACTION="${ANTHROPIC_VERSION_APPEND_ACTION}" \
-  GM_ANTHROPIC_CLOUD="$(lua_bool "${ANTHROPIC_CLOUD}")" \
-  GM_ANTHROPIC_FOUNDRY="${ANTHROPIC_FOUNDRY}" \
-  GM_ANTHROPIC_BEDROCK_UNQUALIFIED="${ANTHROPIC_BEDROCK_UNQUALIFIED}" \
-  GM_ANTHROPIC_SLOT_MAP="${GM_ANTHROPIC_SLOT_MAP}" \
-  GM_ANTHROPIC_DEFAULT_SLOT_ENV="${GM_ANTHROPIC_DEFAULT_SLOT_ENV}" \
-  GM_ANTHROPIC_SAN_MATCH="${ANTHROPIC_SAN_MATCH}" \
-  GM_ANTHROPIC_SAN_VALUE="${ANTHROPIC_SAN_VALUE}" \
   GM_OPENAI_HOST="${OPENAI_HOST}" \
-  GM_OPENAI_PORT="${OPENAI_PORT}" \
-  GM_OPENAI_CLOUD="$(lua_bool "${OPENAI_CLOUD}")" \
-  GM_OPENAI_SLOT_MAP="${GM_OPENAI_SLOT_MAP}" \
-  GM_OPENAI_DEFAULT_SLOT_ENV="${GM_OPENAI_DEFAULT_SLOT_ENV}" \
-  GM_GEMINI_SLOT_MAP="${GM_GEMINI_SLOT_MAP}" \
-  GM_GEMINI_DEFAULT_SLOT_ENV="${GM_GEMINI_DEFAULT_SLOT_ENV}" \
-  GM_CHUTES_SLOT_MAP="${GM_CHUTES_SLOT_MAP}" \
-  GM_CHUTES_DEFAULT_SLOT_ENV="${GM_CHUTES_DEFAULT_SLOT_ENV}" \
-  GM_ZAI_SLOT_MAP="${GM_ZAI_SLOT_MAP}" \
-  GM_ZAI_DEFAULT_SLOT_ENV="${GM_ZAI_DEFAULT_SLOT_ENV}" \
-  GM_MOONSHOT_SLOT_MAP="${GM_MOONSHOT_SLOT_MAP}" \
-  GM_MOONSHOT_DEFAULT_SLOT_ENV="${GM_MOONSHOT_DEFAULT_SLOT_ENV}" \
-  GM_DEEPINFRA_SLOT_MAP="${GM_DEEPINFRA_SLOT_MAP}" \
-  GM_DEEPINFRA_DEFAULT_SLOT_ENV="${GM_DEEPINFRA_DEFAULT_SLOT_ENV}" \
-  GM_KUBETEE_SLOT_MAP="${GM_KUBETEE_SLOT_MAP}" \
-  GM_KUBETEE_DEFAULT_SLOT_ENV="${GM_KUBETEE_DEFAULT_SLOT_ENV}" \
-  GM_ENGY_SLOT_MAP="${GM_ENGY_SLOT_MAP}" \
-  GM_ENGY_DEFAULT_SLOT_ENV="${GM_ENGY_DEFAULT_SLOT_ENV}" \
-  GM_MOONMATH_SLOT_MAP="${GM_MOONMATH_SLOT_MAP}" \
-  GM_MOONMATH_DEFAULT_SLOT_ENV="${GM_MOONMATH_DEFAULT_SLOT_ENV}" \
-  GM_NEAR_SLOT_MAP="${GM_NEAR_SLOT_MAP}" \
-  GM_NEAR_DEFAULT_SLOT_ENV="${GM_NEAR_DEFAULT_SLOT_ENV}" \
-  GM_OPENAI_SAN_MATCH="${OPENAI_SAN_MATCH}" \
-  GM_OPENAI_SAN_VALUE="${OPENAI_SAN_VALUE}" \
-  GM_OPENAI_AZURE_TLS="${OPENAI_AZURE_TLS}" \
-  awk '
-  function subst(line, token, value,    out, rest, pos) {
-    out = ""
-    rest = line
-    while ((pos = index(rest, token)) > 0) {
-      out = out substr(rest, 1, pos - 1) value
-      rest = substr(rest, pos + length(token))
-    }
-    return out rest
-  }
-  BEGIN {
-    # Rendered raw into a Lua string literal; injection-safe only because
-    # validate_node_secret already rejected any quote/backslash/newline.
-    secret = ENVIRON["GM_NODE_SECRET"]
-    bench_host = ENVIRON["GM_BENCHMARK_HOST"]
-    bench_port = ENVIRON["GM_BENCHMARK_PORT"]
-    bench_tls = (ENVIRON["GM_BENCHMARK_TLS"] == "1")
-    anthropic_host = ENVIRON["GM_ANTHROPIC_HOST"]
-    anthropic_port = ENVIRON["GM_ANTHROPIC_PORT"]
-    anthropic_version_append_action = ENVIRON["GM_ANTHROPIC_VERSION_APPEND_ACTION"]
-    anthropic_cloud = ENVIRON["GM_ANTHROPIC_CLOUD"]
-    anthropic_foundry = (ENVIRON["GM_ANTHROPIC_FOUNDRY"] == "1")
-    anthropic_bedrock_unqualified = (ENVIRON["GM_ANTHROPIC_BEDROCK_UNQUALIFIED"] == "1")
-    anthropic_slot_map = ENVIRON["GM_ANTHROPIC_SLOT_MAP"]
-    anthropic_default_slot_env = ENVIRON["GM_ANTHROPIC_DEFAULT_SLOT_ENV"]
-    anthropic_san_match = ENVIRON["GM_ANTHROPIC_SAN_MATCH"]
-    anthropic_san_value = ENVIRON["GM_ANTHROPIC_SAN_VALUE"]
-    openai_host = ENVIRON["GM_OPENAI_HOST"]
-    openai_port = ENVIRON["GM_OPENAI_PORT"]
-    openai_cloud = ENVIRON["GM_OPENAI_CLOUD"]
-    openai_slot_map = ENVIRON["GM_OPENAI_SLOT_MAP"]
-    openai_default_slot_env = ENVIRON["GM_OPENAI_DEFAULT_SLOT_ENV"]
-    gemini_slot_map = ENVIRON["GM_GEMINI_SLOT_MAP"]
-    gemini_default_slot_env = ENVIRON["GM_GEMINI_DEFAULT_SLOT_ENV"]
-    chutes_slot_map = ENVIRON["GM_CHUTES_SLOT_MAP"]
-    chutes_default_slot_env = ENVIRON["GM_CHUTES_DEFAULT_SLOT_ENV"]
-    zai_slot_map = ENVIRON["GM_ZAI_SLOT_MAP"]
-    zai_default_slot_env = ENVIRON["GM_ZAI_DEFAULT_SLOT_ENV"]
-    moonshot_slot_map = ENVIRON["GM_MOONSHOT_SLOT_MAP"]
-    moonshot_default_slot_env = ENVIRON["GM_MOONSHOT_DEFAULT_SLOT_ENV"]
-    deepinfra_slot_map = ENVIRON["GM_DEEPINFRA_SLOT_MAP"]
-    deepinfra_default_slot_env = ENVIRON["GM_DEEPINFRA_DEFAULT_SLOT_ENV"]
-    kubetee_slot_map = ENVIRON["GM_KUBETEE_SLOT_MAP"]
-    kubetee_default_slot_env = ENVIRON["GM_KUBETEE_DEFAULT_SLOT_ENV"]
-    engy_slot_map = ENVIRON["GM_ENGY_SLOT_MAP"]
-    engy_default_slot_env = ENVIRON["GM_ENGY_DEFAULT_SLOT_ENV"]
-    moonmath_slot_map = ENVIRON["GM_MOONMATH_SLOT_MAP"]
-    moonmath_default_slot_env = ENVIRON["GM_MOONMATH_DEFAULT_SLOT_ENV"]
-    near_slot_map = ENVIRON["GM_NEAR_SLOT_MAP"]
-    near_default_slot_env = ENVIRON["GM_NEAR_DEFAULT_SLOT_ENV"]
-    openai_san_match = ENVIRON["GM_OPENAI_SAN_MATCH"]
-    openai_san_value = ENVIRON["GM_OPENAI_SAN_VALUE"]
-    openai_azure_tls = (ENVIRON["GM_OPENAI_AZURE_TLS"] == "1")
-  }
-  /^[[:space:]]*## gm:benchmark-tls-begin[[:space:]]*$/ { in_tls = 1; next }
-  /^[[:space:]]*## gm:benchmark-tls-end[[:space:]]*$/   { in_tls = 0; next }
-  in_tls && !bench_tls { next }
-  /^[[:space:]]*## gm:openai-azure-responses-reject-begin[[:space:]]*$/ { in_openai_azure_responses_reject = 1; next }
-  /^[[:space:]]*## gm:openai-azure-responses-reject-end[[:space:]]*$/   { in_openai_azure_responses_reject = 0; next }
-  in_openai_azure_responses_reject && !openai_azure_tls { next }
-  /^[[:space:]]*## gm:anthropic-foundry-route-begin[[:space:]]*$/ { in_anthropic_foundry_route = 1; next }
-  /^[[:space:]]*## gm:anthropic-foundry-route-end[[:space:]]*$/   { in_anthropic_foundry_route = 0; next }
-  in_anthropic_foundry_route && !anthropic_foundry { next }
-  /^[[:space:]]*## gm:anthropic-bedrock-reject-route-begin[[:space:]]*$/ { in_anthropic_bedrock_reject_route = 1; next }
-  /^[[:space:]]*## gm:anthropic-bedrock-reject-route-end[[:space:]]*$/   { in_anthropic_bedrock_reject_route = 0; next }
-  in_anthropic_bedrock_reject_route && !anthropic_bedrock_unqualified { next }
-  /^[[:space:]]*## gm:anthropic-direct-route-begin[[:space:]]*$/ { in_anthropic_direct_route = 1; next }
-  /^[[:space:]]*## gm:anthropic-direct-route-end[[:space:]]*$/   { in_anthropic_direct_route = 0; next }
-  in_anthropic_direct_route && (anthropic_foundry || anthropic_bedrock_unqualified) { next }
-  /^[[:space:]]*## gm:openai-azure-route-begin[[:space:]]*$/ { in_openai_azure_tls_route = 1; next }
-  /^[[:space:]]*## gm:openai-azure-route-end[[:space:]]*$/   { in_openai_azure_tls_route = 0; next }
-  in_openai_azure_tls_route && !openai_azure_tls { next }
-  /^[[:space:]]*## gm:openai-direct-route-begin[[:space:]]*$/ { in_openai_direct_route = 1; next }
-  /^[[:space:]]*## gm:openai-direct-route-end[[:space:]]*$/   { in_openai_direct_route = 0; next }
-  in_openai_direct_route && openai_azure_tls { next }
-  /^[[:space:]]*## gm:openai-system-tls-begin[[:space:]]*$/ { in_openai_system_tls = 1; next }
-  /^[[:space:]]*## gm:openai-system-tls-end[[:space:]]*$/   { in_openai_system_tls = 0; next }
-  in_openai_system_tls && openai_azure_tls { next }
-  /^[[:space:]]*## gm:openai-azure-tls-begin[[:space:]]*$/ { in_openai_azure_tls = 1; next }
-  /^[[:space:]]*## gm:openai-azure-tls-end[[:space:]]*$/   { in_openai_azure_tls = 0; next }
-  in_openai_azure_tls && !openai_azure_tls { next }
-  {
-    line = subst($0, "__GM_BENCHMARK_HOST__", bench_host)
-    line = subst(line, "__GM_BENCHMARK_PORT__", bench_port)
-    line = subst(line, "__GM_ANTHROPIC_HOST__", anthropic_host)
-    line = subst(line, "__GM_ANTHROPIC_PORT__", anthropic_port)
-    line = subst(line, "__GM_ANTHROPIC_VERSION_APPEND_ACTION__", anthropic_version_append_action)
-    line = subst(line, "__GM_ANTHROPIC_CLOUD__", anthropic_cloud)
-    line = subst(line, "__GM_ANTHROPIC_BEDROCK_UNQUALIFIED__", (anthropic_bedrock_unqualified ? "true" : "false"))
-    line = subst(line, "__GM_ANTHROPIC_SLOT_MAP__", anthropic_slot_map)
-    line = subst(line, "__GM_ANTHROPIC_DEFAULT_SLOT_ENV__", anthropic_default_slot_env)
-    line = subst(line, "__GM_ANTHROPIC_SAN_MATCH__", anthropic_san_match)
-    line = subst(line, "__GM_ANTHROPIC_SAN_VALUE__", anthropic_san_value)
-    line = subst(line, "__GM_OPENAI_HOST__", openai_host)
-    line = subst(line, "__GM_OPENAI_PORT__", openai_port)
-    line = subst(line, "__GM_OPENAI_CLOUD__", openai_cloud)
-    line = subst(line, "__GM_OPENAI_SLOT_MAP__", openai_slot_map)
-    line = subst(line, "__GM_OPENAI_DEFAULT_SLOT_ENV__", openai_default_slot_env)
-    line = subst(line, "__GM_GEMINI_SLOT_MAP__", gemini_slot_map)
-    line = subst(line, "__GM_GEMINI_DEFAULT_SLOT_ENV__", gemini_default_slot_env)
-    line = subst(line, "__GM_CHUTES_SLOT_MAP__", chutes_slot_map)
-    line = subst(line, "__GM_CHUTES_DEFAULT_SLOT_ENV__", chutes_default_slot_env)
-    line = subst(line, "__GM_ZAI_SLOT_MAP__", zai_slot_map)
-    line = subst(line, "__GM_ZAI_DEFAULT_SLOT_ENV__", zai_default_slot_env)
-    line = subst(line, "__GM_MOONSHOT_SLOT_MAP__", moonshot_slot_map)
-    line = subst(line, "__GM_MOONSHOT_DEFAULT_SLOT_ENV__", moonshot_default_slot_env)
-    line = subst(line, "__GM_DEEPINFRA_SLOT_MAP__", deepinfra_slot_map)
-    line = subst(line, "__GM_DEEPINFRA_DEFAULT_SLOT_ENV__", deepinfra_default_slot_env)
-    line = subst(line, "__GM_KUBETEE_SLOT_MAP__", kubetee_slot_map)
-    line = subst(line, "__GM_KUBETEE_DEFAULT_SLOT_ENV__", kubetee_default_slot_env)
-    line = subst(line, "__GM_ENGY_SLOT_MAP__", engy_slot_map)
-    line = subst(line, "__GM_ENGY_DEFAULT_SLOT_ENV__", engy_default_slot_env)
-    line = subst(line, "__GM_MOONMATH_SLOT_MAP__", moonmath_slot_map)
-    line = subst(line, "__GM_MOONMATH_DEFAULT_SLOT_ENV__", moonmath_default_slot_env)
-    line = subst(line, "__GM_NEAR_SLOT_MAP__", near_slot_map)
-    line = subst(line, "__GM_NEAR_DEFAULT_SLOT_ENV__", near_default_slot_env)
-    line = subst(line, "__GM_OPENAI_SAN_MATCH__", openai_san_match)
-    line = subst(line, "__GM_OPENAI_SAN_VALUE__", openai_san_value)
-    # Substitute the node secret last: an accepted secret may itself look like a
-    # `__GM_*__` token, and rescanning it would re-expand that token. Applied
-    # after every other replacement, the inserted value is never re-scanned.
-    line = subst(line, "__GM_NODE_SECRET__", secret)
-    print line
-  }
-' "${GM_ENVOY_TEMPLATE_PATH:-/etc/envoy/envoy.yaml}" >"${RENDERED_CONFIG}"
+  GM_OPENAI_SAN_SUFFIX="${OPENAI_SAN_SUFFIX}" \
+  "${GMCLI_BIN:-gmcli}" render-envoy \
+  --template-dir "${GM_ENVOY_TEMPLATE_DIR:-/etc/envoy}" \
+  --out "${RENDERED_CONFIG}" \
+  --select "anthropic=${ANTHROPIC_UPSTREAM}" \
+  --select "openai=${OPENAI_UPSTREAM}"
 
 if [[ -n "${GM_NODE_SECRET:-}" ]]; then
   log "GM_NODE_SECRET set — envoy enforces x-gm-node-key on inbound requests"
@@ -738,17 +445,13 @@ else
   log "warning: GM_NODE_SECRET unset — inbound data plane is unauthenticated"
 fi
 
-if [[ "${BENCHMARK_TLS}" -eq 1 ]]; then
-  log "benchmark route proxies to https://${BENCHMARK_HOST}:${BENCHMARK_PORT} (GM_NETWORK=${GM_NETWORK})"
-else
-  log "benchmark route proxies to http://${BENCHMARK_HOST}:${BENCHMARK_PORT} (GM_NETWORK=${GM_NETWORK})"
-fi
+log "benchmark route proxies to https://${BENCHMARK_HOST} (GM_NETWORK=${GM_NETWORK})"
 
 if [[ "${ANTHROPIC_UPSTREAM}" == "bedrock" ]]; then
-  log "anthropic Bedrock inference is rejected as unqualified (configured host https://${ANTHROPIC_HOST}:${ANTHROPIC_PORT} is retained only for non-inference checks)"
+  log "anthropic Bedrock inference is rejected as unqualified (configured host https://${ANTHROPIC_HOST} is retained only for non-inference checks)"
 fi
 if [[ "${OPENAI_UPSTREAM}" == "azure" ]]; then
-  log "openai route proxies to Azure OpenAI at https://${OPENAI_HOST}:${OPENAI_PORT}"
+  log "openai route proxies to Azure OpenAI at https://${OPENAI_HOST}"
 fi
 
 GM_IMAGE_VERSION="${GM_IMAGE_VERSION:-unknown}"
@@ -766,7 +469,7 @@ fi
 # quote bound to that key, and issues an X.509 cert carrying the quote.
 # It writes the PEM key/cert to /tmp/gm-ratls/; envoy's :8080
 # DownstreamTlsContext references those exact paths (the paths are a
-# build-time contract baked into both gm-miner-ratls and envoy.yaml).
+# build-time contract baked into both gm-miner-ratls and image/envoy/base.yaml).
 #
 # This is a one-shot step that must finish before envoy starts — envoy
 # fails to bind a TLS listener if the cert files are absent. A dstack

@@ -72,11 +72,9 @@ exec sleep 30
         .env("PATH", format!("{}:/bin:/usr/bin", bin.display()))
         .env("GM_TEST_MARKERS", &markers)
         .env("GM_TEST_PREFLIGHT_EXIT", preflight_exit.to_string())
-        .env(
-            "GM_ENVOY_TEMPLATE_PATH",
-            repo_root().join("image/envoy.yaml"),
-        )
+        .env("GM_ENVOY_TEMPLATE_DIR", repo_root().join("image/envoy"))
         .env("GM_RENDERED_CONFIG", rendered)
+        .env("GMCLI_BIN", env!("CARGO_BIN_EXE_gmcli"))
         .env("GM_NETWORK", "testnet")
         .env("NEAR_API_KEY", "test-key");
     if let Some(exit) = runtime_exit {

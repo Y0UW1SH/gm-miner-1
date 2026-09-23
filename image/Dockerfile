@@ -93,8 +93,8 @@ COPY --from=builder /build/target/release/gm-miner-ratls /usr/local/bin/gm-miner
 ## one exact TLS connection; Envoy never has a direct NEAR origin route.
 COPY --from=builder /build/target/release/gm-near-verify-proxy /usr/local/bin/gm-near-verify-proxy
 
-## Copy Envoy config.
-COPY image/envoy.yaml /etc/envoy/envoy.yaml
+## Copy the Envoy config templates; start.sh renders them with gmcli render-envoy.
+COPY image/envoy/ /etc/envoy/
 
 ## Copy startup script.
 COPY image/start.sh /usr/local/bin/start.sh
@@ -103,14 +103,14 @@ RUN chmod +x /usr/local/bin/start.sh
 ## Envoy data-plane port: RA-TLS-terminated upstream request proxying
 ## AND the registry's GET /attestation/info probes (envoy routes that
 ## path to the loopback-bound attestation server). TLS is terminated
-## with the dstack-minted RA-TLS certificate (see start.sh / envoy.yaml).
+## with the dstack-minted RA-TLS certificate (see start.sh / image/envoy/).
 EXPOSE 8080
 ## Envoy admin port — runtime config introspection, `/quitquitquit`, and
 ## the raw `/stats/prometheus`. Bound to localhost via the admin block
-## in envoy.yaml; the EXPOSE is informational only and the port is never
+## in image/envoy/base.yaml; the EXPOSE is informational only and the port is never
 ## published to the host.
 EXPOSE 9901
-## Envoy Prometheus metrics port. The `metrics` listener in envoy.yaml
+## Envoy Prometheus metrics port. The `metrics` listener in image/envoy/base.yaml
 ## serves ONLY `/stats/prometheus` (gated on x-gm-node-key) and proxies
 ## it to the loopback admin port; the rest of the admin surface stays
 ## unreachable. Published by dstack/docker-compose.yaml so scrapers can
