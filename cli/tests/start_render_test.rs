@@ -143,12 +143,12 @@ fn execute_lua(source: &str) {
 
 fn run_request(rendered: &str, headers: &[(&str, &str)], env: &[(&str, &str)]) -> Lua {
     let lua = Lua::new();
+    let list = lua.create_table().expect("header list");
+    for (index, (name, value)) in headers.iter().enumerate() {
+        list.set(index + 1, [*name, *value]).expect("header pair");
+    }
     lua.globals()
-        .set(
-            "input_headers",
-            lua.create_table_from(headers.iter().copied())
-                .expect("headers"),
-        )
+        .set("input_header_list", list)
         .expect("input headers");
     lua.globals()
         .set(
@@ -746,19 +746,20 @@ fn internal_headers_are_stripped_without_changing_provider_or_near_routing() {
                 .as_array()
                 .expect("removed headers")
                 .contains(&json!("x-gm-provider")));
-            let near_model = provider == "near" && path != "/v1/models";
+            let routed_selector =
+                (provider == "near" && path != "/v1/models") || provider == "chutes";
             assert_eq!(
                 headers
                     .get::<Option<String>>("x-gm-upstream-model")
                     .expect("model"),
-                near_model.then(|| "Qwen/Qwen3.8-27B".to_owned())
+                routed_selector.then(|| "Qwen/Qwen3.8-27B".to_owned())
             );
             for pair in headers.pairs::<String, String>() {
                 let (name, _) = pair.expect("header");
                 assert!(
                     !name.starts_with("x-gm-")
                         || name == "x-gm-provider"
-                        || (near_model && name == "x-gm-upstream-model"),
+                        || (routed_selector && name == "x-gm-upstream-model"),
                     "{provider} leaked {name}"
                 );
             }
@@ -1118,4 +1119,401 @@ fn deepinfra_native_inference_preserves_path_and_disables_replay() {
             }
         }
     }
+}
+
+/// The route Envoy selects for a request: the first whose path and every
+/// header matcher (`exact`, or `suffix` with optional `ignore_case`) match.
+fn matching_route<'a>(config: &'a Value, path: &str, headers: &[(String, String)]) -> &'a Value {
+    let bare = path.split('?').next().expect("path");
+    let header = |name: &str| {
+        headers
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    };
+    ingress(config)["route_config"]["virtual_hosts"][0]["routes"]
+        .as_array()
+        .expect("routes")
+        .iter()
+        .find(|route| {
+            let target = &route["match"];
+            let path_matches = target["path"].as_str() == Some(bare)
+                || target["prefix"]
+                    .as_str()
+                    .is_some_and(|prefix| bare.starts_with(prefix))
+                || target["safe_regex"]["regex"]
+                    .as_str()
+                    .is_some_and(|pattern| {
+                        regex::Regex::new(pattern)
+                            .expect("route regex")
+                            .is_match(bare)
+                    });
+            path_matches
+                && target["headers"].as_array().is_none_or(|matchers| {
+                    matchers.iter().all(|matcher| {
+                        let name = matcher["name"].as_str().expect("header name");
+                        let rule = &matcher["string_match"];
+                        let Some(value) = header(name) else {
+                            return false;
+                        };
+                        if let Some(exact) = rule["exact"].as_str() {
+                            return value == exact;
+                        }
+                        let suffix = rule["suffix"].as_str().expect("suffix or exact matcher");
+                        if rule["ignore_case"] == true {
+                            value
+                                .to_ascii_lowercase()
+                                .ends_with(&suffix.to_ascii_lowercase())
+                        } else {
+                            value.ends_with(suffix)
+                        }
+                    })
+                })
+        })
+        .expect("matching route")
+}
+
+struct Forwarded {
+    status: Option<String>,
+    cluster: String,
+    headers: Vec<(String, String)>,
+}
+
+/// Run the data-plane Lua on a request, select its route from the headers
+/// Lua leaves, and apply that route's header removals: what leaves Envoy.
+fn forward_chutes(rendered: &str, path: &str, extra: &[(&str, &str)]) -> Forwarded {
+    forward_chutes_with(
+        rendered,
+        path,
+        extra,
+        &[
+            ("CHUTES_API_KEY", "chutes-key"),
+            ("GM_CHUTES_KEY_SLOT_1", "chutes-key"),
+        ],
+    )
+}
+
+fn forward_chutes_with(
+    rendered: &str,
+    path: &str,
+    extra: &[(&str, &str)],
+    env: &[(&str, &str)],
+) -> Forwarded {
+    let mut input = vec![
+        (":path", path),
+        ("x-gm-provider", "chutes"),
+        ("x-gm-node-key", "test-node-secret-0001"),
+        ("x-gm-request-id", "request-123"),
+        ("authorization", "caller-secret"),
+    ];
+    input.extend_from_slice(extra);
+    let lua = run_request(rendered, &input, env);
+    let status = lua
+        .globals()
+        .get::<Option<String>>("response_status")
+        .expect("status");
+    if status.is_some() {
+        return Forwarded {
+            status,
+            cluster: String::new(),
+            headers: Vec::new(),
+        };
+    }
+    let mut headers = lua
+        .globals()
+        .get::<mlua::Table>("input_headers")
+        .expect("headers")
+        .pairs::<String, String>()
+        .map(|pair| pair.expect("header"))
+        .collect::<Vec<_>>();
+    let parsed = config(rendered);
+    let selected = matching_route(&parsed, path, &headers);
+    let removed = selected["request_headers_to_remove"]
+        .as_array()
+        .expect("removed headers");
+    headers.retain(|(name, _)| !removed.contains(&json!(name)));
+    Forwarded {
+        status,
+        cluster: selected["route"]["cluster"]
+            .as_str()
+            .expect("cluster")
+            .to_owned(),
+        headers,
+    }
+}
+
+fn chutes_config() -> String {
+    let (status, _, stderr, rendered) = render_envoy([("CHUTES_API_KEY", "chutes-key")]);
+    assert!(status.success(), "render failed: {stderr}");
+    rendered
+}
+
+fn forwarded_header<'a>(forwarded: &'a Forwarded, name: &str) -> Option<&'a str> {
+    forwarded
+        .headers
+        .iter()
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| value.as_str())
+}
+
+#[test]
+fn chutes_tee_selectors_reach_the_verification_proxy_with_the_selector_and_key() {
+    let rendered = chutes_config();
+    for (path, selector) in [
+        ("/v1/chat/completions", "zai-org/GLM-5.2-TEE"),
+        ("/v1/chat/completions", "zai-org/glm-5.2-tee"),
+        ("/v1/chat/completions", "unknown/Model-TEE"),
+        ("/v1/models", "zai-org/GLM-5.2-TEE"),
+        ("/v1/completions", "zai-org/GLM-5.2-TEE"),
+    ] {
+        for extra in [vec![], vec![("x-gm-ordinary", "1")]] {
+            let mut headers = vec![("x-gm-upstream-model", selector)];
+            headers.extend(extra);
+            let forwarded = forward_chutes(&rendered, path, &headers);
+            assert_eq!(forwarded.status, None);
+            assert_eq!(
+                forwarded.cluster, "chutes_verify_proxy",
+                "{path} {selector}"
+            );
+            assert_eq!(
+                forwarded_header(&forwarded, "x-gm-upstream-model"),
+                Some(selector)
+            );
+            assert_eq!(
+                forwarded_header(&forwarded, "authorization"),
+                Some("Bearer chutes-key")
+            );
+            for (name, _) in &forwarded.headers {
+                assert!(
+                    !name.starts_with("x-gm-") || name == "x-gm-upstream-model",
+                    "{name} reached the proxy"
+                );
+            }
+        }
+    }
+    let parsed = config(&rendered);
+    let proxy = cluster(&parsed, "chutes_verify_proxy");
+    assert_eq!(
+        proxy["load_assignment"]["endpoints"][0]["lb_endpoints"][0]["endpoint"]["address"]
+            ["socket_address"],
+        json!({"address": "127.0.0.1", "port_value": 8083})
+    );
+}
+
+#[test]
+fn chutes_other_selectors_go_direct_without_gm_headers() {
+    let rendered = chutes_config();
+    for (path, selector) in [
+        ("/v1/chat/completions", Some("zai-org/GLM-5.2")),
+        ("/v1/chat/completions", Some("zai-org/GLM-5.2-TEE-mirror")),
+        ("/v1/models", None),
+        ("/v1/models", Some("zai-org/GLM-5.2")),
+    ] {
+        let mut headers = vec![("x-gm-ordinary", "1")];
+        if let Some(selector) = selector {
+            headers.push(("x-gm-upstream-model", selector));
+        }
+        let forwarded = forward_chutes(&rendered, path, &headers);
+        assert_eq!(forwarded.status, None, "{path} {selector:?}");
+        assert_eq!(forwarded.cluster, "chutes", "{path} {selector:?}");
+        for (name, _) in &forwarded.headers {
+            assert!(!name.starts_with("x-gm-"), "{name} left for Chutes");
+        }
+        assert_eq!(
+            forwarded_header(&forwarded, "authorization"),
+            Some("Bearer chutes-key")
+        );
+    }
+    assert_tls(&config(&rendered), "chutes", "llm.chutes.ai");
+}
+
+#[test]
+fn chutes_chat_without_a_selector_is_refused() {
+    let rendered = chutes_config();
+    let forwarded = forward_chutes(&rendered, "/v1/chat/completions?x=1", &[]);
+    assert_eq!(forwarded.status.as_deref(), Some("400"));
+}
+
+#[test]
+fn chutes_selector_must_be_one_value() {
+    let rendered = chutes_config();
+    let tee = "zai-org/GLM-5.2-TEE";
+    let open = "zai-org/GLM-5.2";
+    let joined = format!("{tee}, {open}");
+    let joined_reversed = format!("{open},{tee}");
+    for headers in [
+        vec![("x-gm-upstream-model", tee), ("x-gm-upstream-model", open)],
+        vec![("x-gm-upstream-model", open), ("x-gm-upstream-model", tee)],
+        vec![("x-gm-upstream-model", tee), ("X-GM-Upstream-Model", tee)],
+        vec![("x-gm-upstream-model", joined.as_str())],
+        vec![("x-gm-upstream-model", joined_reversed.as_str())],
+    ] {
+        for path in ["/v1/chat/completions", "/v1/models"] {
+            let forwarded = forward_chutes(&rendered, path, &headers);
+            assert_eq!(
+                forwarded.status.as_deref(),
+                Some("400"),
+                "{path} {headers:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn chutes_header_names_match_in_any_case() {
+    let rendered = chutes_config();
+    let forwarded = forward_chutes(
+        &rendered,
+        "/v1/chat/completions",
+        &[("X-GM-Upstream-Model", "zai-org/GLM-5.2-TEE")],
+    );
+    assert_eq!(forwarded.cluster, "chutes_verify_proxy");
+    assert_eq!(
+        forwarded_header(&forwarded, "x-gm-upstream-model"),
+        Some("zai-org/GLM-5.2-TEE")
+    );
+}
+
+#[test]
+fn chutes_requests_other_than_the_model_list_need_a_selector() {
+    let rendered = chutes_config();
+    for path in [
+        "/v1/chat/completions",
+        "/v1/chat/completions/",
+        "/v1//chat/completions",
+        "/V1/chat/completions",
+        "/v1/completions",
+        "/",
+    ] {
+        let forwarded = forward_chutes(&rendered, path, &[]);
+        assert_eq!(forwarded.status.as_deref(), Some("400"), "{path}");
+    }
+}
+
+#[test]
+fn chutes_tee_without_a_verifier_is_unavailable_never_direct() {
+    let rendered = chutes_config();
+    for extra in [
+        vec![("x-gm-upstream-model", "zai-org/GLM-5.2-TEE")],
+        vec![
+            ("x-gm-upstream-model", "zai-org/GLM-5.2-TEE"),
+            ("x-gm-upstream-slot", "slot-1"),
+        ],
+    ] {
+        for env in [vec![], vec![("GM_CHUTES_KEY_SLOT_1", "chutes-key")]] {
+            let forwarded = forward_chutes_with(&rendered, "/v1/chat/completions", &extra, &env);
+            assert_eq!(
+                forwarded.status.as_deref(),
+                Some("503"),
+                "{extra:?} {env:?}"
+            );
+        }
+    }
+    let direct = forward_chutes_with(
+        &rendered,
+        "/v1/chat/completions",
+        &[("x-gm-upstream-model", "zai-org/GLM-5.2")],
+        &[("GM_CHUTES_KEY_SLOT_1", "chutes-key")],
+    );
+    assert_eq!(direct.cluster, "chutes");
+}
+
+#[test]
+fn chutes_empty_selector_is_refused() {
+    let rendered = chutes_config();
+    for selector in ["", " ", "\t"] {
+        for path in ["/v1/chat/completions", "/v1/models"] {
+            let forwarded = forward_chutes(&rendered, path, &[("x-gm-upstream-model", selector)]);
+            assert_eq!(
+                forwarded.status.as_deref(),
+                Some("400"),
+                "{path} {selector:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn chutes_tee_with_an_empty_key_is_unavailable() {
+    let rendered = chutes_config();
+    let forwarded = forward_chutes_with(
+        &rendered,
+        "/v1/chat/completions",
+        &[("x-gm-upstream-model", "zai-org/GLM-5.2-TEE")],
+        &[
+            ("CHUTES_API_KEY", ""),
+            ("GM_CHUTES_KEY_SLOT_1", "chutes-key"),
+        ],
+    );
+    assert_eq!(forwarded.status.as_deref(), Some("503"));
+}
+
+#[test]
+fn an_unreachable_chutes_verifier_answers_503() {
+    let rendered = chutes_config();
+    let lua = run_request(
+        &rendered,
+        &[
+            (":path", "/v1/chat/completions"),
+            ("x-gm-provider", "chutes"),
+            ("x-gm-node-key", "test-node-secret-0001"),
+            ("x-gm-upstream-model", "zai-org/GLM-5.2-TEE"),
+        ],
+        &[
+            ("CHUTES_API_KEY", "chutes-key"),
+            ("GM_CHUTES_KEY_SLOT_1", "chutes-key"),
+        ],
+    );
+    let marked = lua
+        .globals()
+        .get::<mlua::Table>("route_metadata")
+        .expect("route metadata")
+        .get::<Option<bool>>("chutes_verifier")
+        .expect("marker");
+    assert_eq!(marked, Some(true));
+
+    let parsed = config(&rendered);
+    let mappers = ingress(&parsed)["local_reply_config"]["mappers"]
+        .as_array()
+        .expect("mappers");
+    let first_failure_mapper = mappers
+        .iter()
+        .find(|mapper| {
+            let filter = &mapper["filter"];
+            filter["response_flag_filter"].is_object()
+                || filter["and_filter"]["filters"]
+                    .as_array()
+                    .is_some_and(|filters| {
+                        filters
+                            .iter()
+                            .any(|f| f["response_flag_filter"].is_object())
+                    })
+        })
+        .expect("connection-failure mapper");
+    assert_eq!(first_failure_mapper["status_code"], 503);
+    let filters = first_failure_mapper["filter"]["and_filter"]["filters"]
+        .as_array()
+        .expect("verifier mapper conditions");
+    assert!(filters.iter().any(|filter| {
+        filter["metadata_filter"]["matcher"]["filter"] == "gm.route"
+            && filter["metadata_filter"]["matcher"]["path"][0]["key"] == "chutes_verifier"
+    }));
+
+    let direct = run_request(
+        &rendered,
+        &[
+            (":path", "/v1/chat/completions"),
+            ("x-gm-provider", "chutes"),
+            ("x-gm-node-key", "test-node-secret-0001"),
+            ("x-gm-upstream-model", "zai-org/GLM-5.2"),
+        ],
+        &[("GM_CHUTES_KEY_SLOT_1", "chutes-key")],
+    );
+    assert!(direct
+        .globals()
+        .get::<mlua::Table>("route_metadata")
+        .expect("route metadata")
+        .get::<Option<bool>>("chutes_verifier")
+        .expect("marker")
+        .is_none());
 }

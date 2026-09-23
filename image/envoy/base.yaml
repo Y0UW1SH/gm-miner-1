@@ -111,6 +111,26 @@ static_resources:
                       body_format_override:
                         json_format:
                           error: "miner saturated — request rate limited"
+                    ## A Chutes verifier that cannot be reached answers 503, as when no
+                    ## verifier is configured; the Lua filter marks verifier requests.
+                    - filter:
+                        and_filter:
+                          filters:
+                            - response_flag_filter:
+                                flags: ["UF", "UC", "UR", "URX"]
+                            - metadata_filter:
+                                matcher:
+                                  filter: gm.route
+                                  path:
+                                    - key: chutes_verifier
+                                  value:
+                                    bool_match: true
+                      status_code: 503
+                      body_format_override:
+                        json_format:
+                          error:
+                            type: "gm_chutes_verifier_unavailable"
+                            message: "Chutes verifier unavailable"
                     ## Envoy's own plain-text 503 for an upstream that never answered becomes a
                     ## JSON 502. Never put a provider-drain phrase (quota, credit, billing,
                     ## account, api key) in this body: see README.md.
@@ -219,13 +239,15 @@ static_resources:
 
                           local function strip_internal_headers(headers, provider)
                             -- Envoy forbids header mutation during iteration. Keep the
-                            -- route discriminator until route actions remove it, and
-                            -- NEAR's validated selector until its loopback verifier.
+                            -- route discriminator until route actions remove it,
+                            -- NEAR's validated selector until its loopback verifier,
+                            -- and Chutes' selector, which chooses its route.
                             local names = {}
                             for name in pairs(headers) do
                               if name:sub(1, 5) == "x-gm-"
                                 and name ~= "x-gm-provider"
-                                and not (provider == "near" and name == "x-gm-upstream-model") then
+                                and not ((provider == "near" or provider == "chutes")
+                                  and name == "x-gm-upstream-model") then
                                 names[#names + 1] = name
                               end
                             end
@@ -309,6 +331,48 @@ static_resources:
                             return true
                           end
 
+                          local function reject(handle, status, message)
+                            handle:respond(
+                              {[":status"] = status,
+                               ["content-type"] = "application/json"},
+                              "{\"error\":\"" .. message .. "\"}")
+                          end
+
+                          -- Chutes routes on one exact selector: a single value with no
+                          -- comma, required on every path but the model list. A `-TEE`
+                          -- selector needs the verifier, which runs only with a key.
+                          local function chutes_selector_accepted(handle, headers, bare)
+                            local selector = headers:get("x-gm-upstream-model")
+                            if selector == nil then
+                              if bare == "/v1/models" then
+                                return true
+                              end
+                              reject(handle, "400", "missing Chutes source model")
+                              return false
+                            end
+                            if selector:match("^%s*$") then
+                              reject(handle, "400", "empty Chutes source model")
+                              return false
+                            end
+                            if selector:find(",", 1, true)
+                              or headers:getNumValues("x-gm-upstream-model") ~= 1 then
+                              reject(handle, "400", "ambiguous Chutes source model")
+                              return false
+                            end
+                            if selector:lower():sub(-4) == "-tee" then
+                              local key = getenv("CHUTES_API_KEY")
+                              if key == nil or key == "" then
+                                reject(handle, "503", "Chutes verifier unavailable")
+                                return false
+                              end
+                              -- Lets the local reply mapper answer 503 if the verifier
+                              -- cannot be reached.
+                              handle:streamInfo():dynamicMetadata():set(
+                                "gm.route", "chutes_verifier", true)
+                            end
+                            return true
+                          end
+
                           function envoy_on_request(handle)
                             -- The attestation surface is public by
                             -- contract: the registry's control loop
@@ -369,8 +433,12 @@ static_resources:
                               headers:remove("x-envoy-max-retries")
                               headers:remove("x-envoy-hedge-on-per-try-timeout")
                             end
-                            if provider ~= "near" or bare == "/v1/models" then
+                            if (provider ~= "near" and provider ~= "chutes")
+                              or (provider == "near" and bare == "/v1/models") then
                               headers:remove("x-gm-upstream-model")
+                            end
+                            if provider == "chutes" and not chutes_selector_accepted(handle, headers, bare) then
+                              return
                             end
                             if provider == "near" and bare ~= "/v1/models" then
                               local model = headers:get("x-gm-upstream-model")
