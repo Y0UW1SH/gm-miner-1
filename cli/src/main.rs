@@ -49,8 +49,12 @@ use anyhow::{Context as _, Result};
 use chrono::Timelike as _;
 use clap::{Parser, Subcommand};
 use gm_miner_cli::{
-    client::RegistryClient, deploy::DEFAULT_BOOT_TIMEOUT_SECS, network::Network,
-    pricing::parse_discount_pct, types::Provider,
+    client::RegistryClient,
+    deploy::DEFAULT_BOOT_TIMEOUT_SECS,
+    network::Network,
+    notifications::{channel, Listing, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE},
+    pricing::parse_discount_pct,
+    types::Provider,
 };
 
 use crate::commands::deploy::{
@@ -63,6 +67,10 @@ use crate::commands::fun::{cmd_gm, cmd_moon};
 use crate::commands::hotkey::cmd_register_hotkey;
 use crate::commands::image_canary::cmd_image_canary;
 use crate::commands::keys::SetApiKeysArgs;
+use crate::commands::notifications::{
+    cmd_notifications_confirm, cmd_notifications_list, cmd_notifications_off,
+    cmd_notifications_set, cmd_notifications_status,
+};
 use crate::commands::persist::{cmd_login, ensure_fresh_token, load_config};
 use crate::commands::pricing::cmd_pricing;
 use crate::commands::products::{
@@ -583,6 +591,15 @@ enum Command {
         #[command(subcommand)]
         command: WorkerCommand,
     },
+
+    /// Read your notifications and manage your notification channel.
+    ///
+    /// The registry keeps recent events addressed to your hotkey or its
+    /// workers, so `notifications list` works without setting up a channel.
+    Notifications {
+        #[command(subcommand)]
+        command: NotificationsCommand,
+    },
 }
 
 /// Deploy flags shared by `gmcli deploy` (worker #1) and
@@ -726,17 +743,71 @@ enum WorkerCommand {
     },
 }
 
+#[derive(Subcommand)]
+enum NotificationsCommand {
+    /// Set a notification channel and send a confirmation code.
+    #[command(after_help = "Examples (replace placeholders):\n  \
+        gmcli notifications set 'https://discord.com/api/webhooks/id/token'\n  \
+        gmcli notifications set 'tgram://token/chat_id'\n  \
+        gmcli notifications set 'slack://tokenA/tokenB/tokenC' --digest\n  \
+        gmcli notifications set 'jsons://example.com/webhook'\n  \
+        gmcli notifications set - < channel-url.txt\n\n\
+        Pass - to read the URL from a pipe or file and keep it out of shell history.\n\
+        The URL is never printed or saved by gmcli. Setting a channel replaces\n\
+        the previous channel; confirm the code before notifications resume.")]
+    Set {
+        /// Apprise URL, or - to read from stdin without putting it in shell history.
+        #[arg(value_name = "apprise-url")]
+        apprise_url: String,
+        /// Opt in to digests when available (digest delivery is not enabled in v1).
+        #[arg(long)]
+        digest: bool,
+    },
+    /// Confirm your channel with the six-digit code sent to it.
+    Confirm {
+        /// Six-digit confirmation code (expires after 15 minutes).
+        code: String,
+    },
+    /// Show channel verification state and delivery health.
+    Status,
+    /// Remove your notification channel.
+    Off,
+    /// List your notifications, newest first, with times in UTC
+    /// (`GET /miners/me/notifications/messages`).
+    #[command(after_help = "Examples:\n  \
+        gmcli notifications list\n  \
+        gmcli notifications list --limit 50\n  \
+        gmcli notifications list --before 1234\n  \
+        gmcli notifications list --all")]
+    List {
+        /// How many to show, 1-100.
+        #[arg(
+            long,
+            default_value_t = DEFAULT_PAGE_SIZE,
+            value_parser = clap::value_parser!(u32).range(1..=i64::from(MAX_PAGE_SIZE)),
+            conflicts_with = "all"
+        )]
+        limit: u32,
+        /// Show notifications older than this id (the cursor the previous
+        /// page printed).
+        // The registry cursor is a positive signed BIGINT.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..(1_u64 << 63)), conflicts_with = "all")]
+        before: Option<u64>,
+        /// Fetch every page, up to the newest 1000 notifications.
+        #[arg(long)]
+        all: bool,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "warn".into()))
-        .init();
-
-    if std::env::args().len() == 1 && std::io::stdout().is_terminal() {
+    if std::env::args_os().len() == 1 && std::io::stdout().is_terminal() {
         println!("{}", banner());
     }
-
     let cli = Cli::parse();
+    let log_filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "warn".into());
+    tracing_subscriber::fmt().with_env_filter(log_filter).init();
+
     dispatch(cli).await
 }
 
@@ -831,6 +902,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
         Command::ListProducts | Command::Status => cmd_status(&mut context.client().await?).await,
         Command::Pricing => cmd_pricing(&mut context.client().await?).await,
         Command::Sources => cmd_sources(&mut context.client().await?).await,
+        Command::Notifications { command } => dispatch_notifications(command, &context).await,
         // Upgrades must work with expired tokens or a damaged config.
         Command::Update => cmd_update().await,
         Command::Earnings { .. } => cmd_earnings(&context.config()?).await,
@@ -908,9 +980,39 @@ fn cmd_render_envoy(template_dir: &Path, out: &Path, select: Vec<(String, String
     std::fs::write(out, rendered).with_context(|| format!("write {}", out.display()))
 }
 
-/// Route the `worker` subcommands. Each loads config, refreshes the token,
-/// then hands off to the matching `cmd_worker_*`. Split from [`dispatch`] so
-/// the top-level router stays under the line limit.
+/// Route inbox and channel operations through the selected network's client.
+async fn dispatch_notifications(
+    command: NotificationsCommand,
+    context: &DispatchContext,
+) -> Result<()> {
+    match command {
+        NotificationsCommand::Set {
+            apprise_url,
+            digest,
+        } => {
+            let destination = channel::read_destination(apprise_url, std::io::stdin().lock())?;
+            cmd_notifications_set(&mut context.client().await?, &destination, digest).await
+        }
+        NotificationsCommand::Confirm { code } => {
+            channel::validate_code(&code)?;
+            cmd_notifications_confirm(&mut context.client().await?, &code).await
+        }
+        NotificationsCommand::Status => {
+            cmd_notifications_status(&mut context.client().await?).await
+        }
+        NotificationsCommand::Off => cmd_notifications_off(&mut context.client().await?).await,
+        NotificationsCommand::List { limit, before, all } => {
+            let listing = if all {
+                Listing::All
+            } else {
+                Listing::Page { limit, before }
+            };
+            cmd_notifications_list(&mut context.client().await?, listing).await
+        }
+    }
+}
+
+/// Route worker subcommands after loading config and refreshing authentication.
 async fn dispatch_worker(
     command: WorkerCommand,
     explicit_network: Option<Network>,
