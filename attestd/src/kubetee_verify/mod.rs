@@ -1,5 +1,9 @@
 //! Attested forwarding of `KubeTEE` chat completions.
 //!
+//! Production admission rejects requests before reading their bodies or opening
+//! upstream connections. The retained platform/transport implementation below
+//! is exercised independently by private test fixtures.
+//!
 //! Each upstream connection to `llm.kubetee.ai` is attested before use and
 //! renewed every 10 minutes. On a new TLS 1.3 connection the proxy fetches a
 //! quote bound to a fresh nonce and verifies it: Intel DCAP chain and an
@@ -124,7 +128,9 @@ pub struct KubeteeVerifier {
     collateral: Arc<dyn Collateral>,
     nonce: fn() -> [u8; 32],
     pool: Arc<Pool>,
-    verify_attestation: VerifyAttestation,
+    // No production admission verifier is available. Only private transport
+    // tests install platform-only checks; they do not authorize workloads.
+    verify_attestation: Option<VerifyAttestation>,
 }
 
 impl fmt::Debug for KubeteeVerifier {
@@ -171,8 +177,13 @@ impl KubeteeVerifier {
             collateral,
             nonce,
             pool: Arc::new(Pool::new(limits)),
-            verify_attestation: evidence::verify_attestation,
+            verify_attestation: None,
         }
+    }
+
+    fn admission_verifier(&self) -> Result<VerifyAttestation> {
+        self.verify_attestation
+            .context(evidence::ADMISSION_DISABLED)
     }
 
     /// Attest one new connection, sending no inference, and close it.
@@ -181,6 +192,7 @@ impl KubeteeVerifier {
     ///
     /// Returns an error when every attempt to connect and attest fails.
     pub async fn preflight(&self) -> Result<Attestation> {
+        self.admission_verifier()?;
         let (connection, attestation) = self.connect_and_attest().await?;
         drop(connection.sender);
         upstream_proxy::finish_connection(PROVIDER, connection.driver).await?;
@@ -196,6 +208,7 @@ impl KubeteeVerifier {
     /// attestation or upstream failure. A request is never sent on a
     /// connection whose attestation failed, and never sent twice.
     pub async fn forward(&self, request: Request<Body>) -> Result<Response<Body>> {
+        self.admission_verifier()?;
         let selector = validate_request(&request)?;
         let request = timeout(
             self.pool.limits().request_read_timeout,
@@ -233,6 +246,7 @@ impl KubeteeVerifier {
     /// Returns an error when no attested connection is available or the list
     /// cannot be read.
     pub async fn models(&self, request: Request<Body>) -> Result<Response<Body>> {
+        self.admission_verifier()?;
         let mut upstream = Request::builder()
             .method(Method::GET)
             .uri(MODELS)
@@ -345,7 +359,7 @@ impl KubeteeVerifier {
         let now = self.collateral.now()?;
         let claims = tee_evidence::verify_signature_chain(&quote, collateral, now)?;
         let measurements =
-            (self.verify_attestation)(&payload, &nonce, connection.leaf.as_ref(), &claims, now)?;
+            (self.admission_verifier()?)(&payload, &nonce, connection.leaf.as_ref(), &claims, now)?;
         evidence::log_attested(&payload.pod, &measurements);
         Ok(Attestation {
             pod: payload.pod,

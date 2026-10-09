@@ -18,6 +18,8 @@ use crate::eventlog::{self, Register};
 use crate::tee_evidence;
 
 const SIGNATURE_ALGORITHM: &str = "RS256";
+pub(super) const ADMISSION_DISABLED: &str =
+    "KubeTEE forwarding disabled: no approved workload/model policy or quote-bound serving key";
 
 /// The `GET /v1/attestation` response body.
 #[derive(Debug, Deserialize)]
@@ -74,9 +76,7 @@ pub fn verify_attestation(
     verify_platform_evidence(payload, nonce, leaf, claims, now)?;
     // A self-consistent event log and a separate nonce signature cannot
     // authorize a workload or prove that it owns the serving TLS key.
-    bail!(
-        "KubeTEE forwarding disabled: no approved workload/model policy or quote-bound serving key"
-    )
+    bail!(ADMISSION_DISABLED)
 }
 
 /// Check evidence consistency using claims already verified against Intel's

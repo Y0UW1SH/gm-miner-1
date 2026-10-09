@@ -12,7 +12,7 @@
 //! certificate chains to a test root, and which signs the TLS-possession
 //! proof with its own test key. Tests using `serve_platform_evidence_only`
 //! inject platform checks to exercise transport in isolation. Production
-//! admission uses `verify_attestation` and is tested separately with `serve`.
+//! admission has no authorized verifier and is tested separately with `serve`.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -544,7 +544,7 @@ async fn serve_platform_evidence_only(
     limits: Limits,
 ) -> (KubeteeVerifier, Arc<Upstream>) {
     let (mut verifier, upstream) = serve(evidence, chat, limits).await;
-    verifier.verify_attestation = verify_platform_evidence;
+    verifier.verify_attestation = Some(verify_platform_evidence);
     (verifier, upstream)
 }
 
@@ -639,16 +639,9 @@ async fn a_chat_without_a_workload_policy_never_reaches_the_supplier() {
         let error = verifier.forward(chat(target)).await.unwrap_err();
         assert!(format!("{error:#}").contains("no approved workload/model policy"));
         assert_eq!(error_response(&error).status(), StatusCode::BAD_GATEWAY);
-        assert_eq!(
-            counts(&upstream),
-            (ATTESTATION_ATTEMPTS, ATTESTATION_ATTEMPTS, 0)
-        );
+        assert_eq!(counts(&upstream), (0, 0, 0));
         assert_eq!(verifier.idle_connections(), 0);
-        for (_, headers, body) in upstream.attestation_requests.lock().unwrap().iter() {
-            assert_eq!(*body, 0);
-            assert!(!headers.contains_key(AUTHORIZATION));
-            assert!(!headers.contains_key("x-buyer-sentinel"));
-        }
+        assert!(upstream.attestation_requests.lock().unwrap().is_empty());
     }
 }
 
@@ -662,6 +655,7 @@ async fn a_model_list_without_a_workload_policy_never_reaches_the_supplier() {
         .unwrap();
     let error = verifier.models(request).await.unwrap_err();
     assert!(format!("{error:#}").contains("no approved workload/model policy"));
+    assert_eq!(counts(&upstream), (0, 0, 0));
     assert_eq!(upstream.model_lists.load(Ordering::SeqCst), 0);
     assert_eq!(verifier.idle_connections(), 0);
 }
@@ -671,11 +665,27 @@ async fn preflight_without_a_workload_policy_cannot_report_success() {
     let (verifier, upstream) = serve(Evidence::Genuine, Chat::Served, limits()).await;
     let error = verifier.preflight().await.unwrap_err();
     assert!(format!("{error:#}").contains("no approved workload/model policy"));
-    assert_eq!(
-        counts(&upstream),
-        (ATTESTATION_ATTEMPTS, ATTESTATION_ATTEMPTS, 0)
-    );
+    assert_eq!(counts(&upstream), (0, 0, 0));
     assert_eq!(verifier.idle_connections(), 0);
+}
+
+#[tokio::test]
+async fn a_chat_without_a_workload_policy_does_not_read_the_request_body() {
+    let (verifier, upstream) = serve(Evidence::Unavailable, Chat::Served, limits()).await;
+    let polls = Arc::new(AtomicUsize::new(0));
+    let body_polls = Arc::clone(&polls);
+    let body = futures_util::stream::poll_fn(move |_| {
+        body_polls.fetch_add(1, Ordering::SeqCst);
+        std::task::Poll::Ready(Some(Err::<Bytes, _>(std::io::Error::other(
+            "disabled admission must not poll the buyer body",
+        ))))
+    });
+    let mut request = chat(TARGETS[0]);
+    *request.body_mut() = Body::from_stream(body);
+    let error = verifier.forward(request).await.unwrap_err();
+    assert!(format!("{error:#}").contains("no approved workload/model policy"));
+    assert_eq!(polls.load(Ordering::SeqCst), 0);
+    assert_eq!(counts(&upstream), (0, 0, 0));
 }
 
 #[tokio::test]

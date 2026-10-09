@@ -304,10 +304,13 @@ image build and the normal image-approval process.
 
 KubeTEE chat forwarding and `/v1/models` discovery are disabled in this image.
 The loopback verification proxy still starts when a KubeTEE key is set, so
-other configured providers continue to run. KubeTEE requests receive 502;
-`gm-kubetee-verify-proxy --verify-once` fails rather than reporting an attested
-endpoint. No buyer prompt, API key or model-list request is sent to the
-supplier on a rejected connection. There is no direct chat fallback or
+other configured providers continue to run. KubeTEE chat and model-list
+requests receive 502 immediately, before reading request bodies or opening
+upstream connections.
+`gm-kubetee-verify-proxy --verify-once` fails locally rather than reporting an
+attested endpoint. Disabled requests perform no attestation or collateral
+fetches and are not retried by the verifier. No buyer prompt, API key or
+model-list request is sent to the supplier on a rejected connection. There is no direct chat fallback or
 configuration flag to bypass this gate. Image generation retains its existing
 direct route; it does not use this chat verifier.
 

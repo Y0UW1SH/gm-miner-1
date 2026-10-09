@@ -23,9 +23,9 @@
 #      carries confidential Chutes requests end to end encrypted to the
 #      admitted instance key.
 #   5. gm-kubetee-verify-proxy (when KUBETEE_API_KEY is configured) —
-#      checks KubeTEE platform evidence but rejects chat and model-list
-#      requests until workload/model policy and serving-key binding
-#      can be verified.
+#      rejects chat and model-list requests locally before reading
+#      request bodies or contacting KubeTEE, until workload/model policy
+#      and serving-key binding can be verified.
 #   6. envoy — the data plane on :8080. Terminates RA-TLS with the
 #      minted certificate, proxies provider inference traffic and the
 #      registry's x-gm-provider capability probes, and forwards
@@ -541,8 +541,8 @@ fi
 
 # ── Launch the KubeTEE verification proxy ─────────────────────────────
 # Envoy sends KubeTEE chat and model-list requests to this proxy on
-# 127.0.0.1:8084. Workload admission currently fails closed after platform
-# appraisal. Keeping the proxy running isolates rejection to KubeTEE requests;
+# 127.0.0.1:8084. Workload admission currently fails closed before contacting
+# KubeTEE. Keeping the proxy running isolates rejection to KubeTEE requests;
 # supervision below brings the container down if the process exits.
 if [[ -n "${KUBETEE_API_KEY:-}" ]]; then
   log "starting KubeTEE verification proxy on 127.0.0.1:8084"
