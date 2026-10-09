@@ -55,17 +55,44 @@ async fn registry(delete: ResponseTemplate) -> MockServer {
 }
 
 async fn run(initial: &Value, id: &str) -> (std::process::Output, Value) {
+    run_with_override(initial, id, None, None).await
+}
+
+async fn run_with_override(
+    initial: &Value,
+    id: &str,
+    api_url: Option<&str>,
+    registry_env: Option<&str>,
+) -> (std::process::Output, Value) {
     let dir = tempfile::tempdir().expect("temporary config");
-    let file = dir.path().join("config.json");
+    run_in_dir(initial, id, api_url, registry_env, dir.path()).await
+}
+
+async fn run_in_dir(
+    initial: &Value,
+    id: &str,
+    api_url: Option<&str>,
+    registry_env: Option<&str>,
+    dir: &std::path::Path,
+) -> (std::process::Output, Value) {
+    let file = dir.join("config.json");
     std::fs::write(
         &file,
         serde_json::to_vec(initial).expect("serialize config"),
     )
     .expect("write config");
-    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_gmcli"))
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_gmcli"));
+    command
         .kill_on_drop(true)
-        .env("GMCLI_CONFIG_DIR", dir.path())
-        .env_remove("GM_REGISTRY_URL")
+        .env("GMCLI_CONFIG_DIR", dir)
+        .env_remove("GM_REGISTRY_URL");
+    if let Some(url) = api_url {
+        command.args(["--api-url", url]);
+    }
+    if let Some(url) = registry_env {
+        command.env("GM_REGISTRY_URL", url);
+    }
+    let output = command
         .args(["worker", "remove", id])
         .output()
         .await
@@ -73,6 +100,102 @@ async fn run(initial: &Value, id: &str) -> (std::process::Output, Value) {
     let saved =
         serde_json::from_slice(&std::fs::read(file).expect("read config")).expect("parse config");
     (output, saved)
+}
+
+#[tokio::test]
+async fn different_registry_override_keeps_local_recovery_record() {
+    let stored = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(LIST_PATH))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"workers": [{
+                "worker_id": WORKER_ID, "endpoint": "https://worker.example", "status": "active"
+            }]})),
+        )
+        .mount(&stored)
+        .await;
+    let other = registry(ResponseTemplate::new(404)).await;
+    Mock::given(method("GET"))
+        .and(path(LIST_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"workers": []})))
+        .mount(&other)
+        .await;
+    let initial = config(&stored);
+    let other_url = other.uri();
+    for (flag, env) in [
+        (Some(other_url.as_str()), None),
+        (None, Some(other_url.as_str())),
+    ] {
+        for id in [WORKER_ID, "app_two", "miner-two"] {
+            let (output, saved) = run_with_override(&initial, id, flag, env).await;
+            assert_eq!(
+                saved, initial,
+                "another registry cannot justify local removal"
+            );
+            assert!(!output.status.success());
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("local worker record retained")
+            );
+            assert!(!String::from_utf8_lossy(&output.stdout).contains("phala cvms delete"));
+        }
+    }
+    assert!(stored
+        .received_requests()
+        .await
+        .expect("requests")
+        .is_empty());
+}
+
+#[tokio::test]
+async fn matching_registry_override_allows_confirmed_absence() {
+    let server = registry(ResponseTemplate::new(404)).await;
+    Mock::given(method("GET"))
+        .and(path(LIST_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"workers": []})))
+        .mount(&server)
+        .await;
+    let initial = config(&server);
+    let url = server.uri();
+    for (flag, env) in [(Some(url.as_str()), None), (None, Some(url.as_str()))] {
+        let (output, saved) = run_with_override(&initial, WORKER_ID, flag, env).await;
+        assert_removed(&initial, &output, &saved);
+    }
+}
+
+#[tokio::test]
+async fn registry_change_during_confirmation_keeps_local_recovery_record() {
+    let server = registry(ResponseTemplate::new(404)).await;
+    let replacement = MockServer::start().await;
+    let initial = config(&server);
+    let mut changed = initial.clone();
+    changed["networks"]["testnet"]["api_url"] = json!(replacement.uri());
+    let changed_bytes = serde_json::to_vec(&changed).expect("serialize changed config");
+    let dir = tempfile::tempdir().expect("temporary config");
+    let file = dir.path().join("config.json");
+    Mock::given(method("GET"))
+        .and(path(LIST_PATH))
+        .respond_with(move |_: &wiremock::Request| {
+            // Model another command changing the saved registry after this
+            // invocation loaded its config, without depending on timing.
+            std::fs::write(&file, &changed_bytes).expect("change saved registry");
+            ResponseTemplate::new(200).set_body_json(json!({"workers": []}))
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+    let (output, saved) = run_in_dir(&initial, WORKER_ID, None, None, dir.path()).await;
+    assert_eq!(
+        saved, changed,
+        "the confirmation belongs to the old registry"
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("local worker record retained"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("phala cvms delete"));
+    assert!(replacement
+        .received_requests()
+        .await
+        .expect("requests")
+        .is_empty());
 }
 
 fn assert_removed(initial: &Value, output: &std::process::Output, saved: &Value) {

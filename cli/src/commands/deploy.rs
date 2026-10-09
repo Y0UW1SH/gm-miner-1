@@ -1251,6 +1251,7 @@ pub(crate) async fn cmd_worker_remove(cfg: Config, id: &str) -> Result<()> {
 
     let app_id = tracked.map(|w| w.app_id.clone());
     let worker_id = tracked.map_or_else(|| id.to_owned(), |w| w.worker_id.clone());
+    let registry_url = cfg.api_url();
 
     let mut client = RegistryClient::new(cfg);
     let hotkey = fetch_hotkey(&mut client).await?;
@@ -1298,6 +1299,15 @@ pub(crate) async fn cmd_worker_remove(cfg: Config, id: &str) -> Result<()> {
     config::with_config_lock(|| {
         let mut cfg = config::load().context("load gmcli config")?;
         cfg.active_network = Some(network);
+        // Absence in an override registry says nothing about the saved one.
+        // Check after reloading under the lock so a concurrent registry change
+        // cannot make the earlier confirmation discard unrelated recovery data.
+        if status == reqwest::StatusCode::NOT_FOUND && cfg.api_url() != registry_url {
+            bail!(
+                "worker absence was confirmed using a different registry URL; local worker record retained. \
+                 Remove any --api-url or GM_REGISTRY_URL override and verify the saved registry before retrying"
+            );
+        }
         cfg.active_entry_mut().remove_worker_by_id(&worker_id);
         config::save(&cfg).context("persist worker removal to gmcli config")
     })?;
