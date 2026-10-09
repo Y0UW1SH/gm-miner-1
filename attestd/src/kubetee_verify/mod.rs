@@ -1,6 +1,6 @@
 //! Attested forwarding of `KubeTEE` chat completions.
 //!
-//! Production admission rejects requests before reading their bodies or opening
+//! Production chat admission rejects requests before reading their bodies or opening
 //! upstream connections. The retained platform/transport implementation below
 //! is exercised independently by private test fixtures.
 //!
@@ -24,14 +24,13 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, ensure, Context, Result};
 use async_trait::async_trait;
 use axum::body::{Body, Bytes};
-use axum::http::header::{AUTHORIZATION, HOST};
+use axum::http::header::HOST;
 use axum::http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode, Uri};
 use dcap_qvl::collateral::CollateralClient;
 use dcap_qvl::QuoteCollateralV3;
 use http_body_util::{BodyExt as _, Limited};
 use hyper::body::Incoming;
 use rustls::{ClientConfig, RootCertStore};
-use serde_json::Value;
 use tokio::time::timeout;
 use tokio_rustls::TlsConnector;
 
@@ -51,7 +50,6 @@ pub const HOST_NAME: &str = "llm.kubetee.ai";
 /// Header carrying the upstream model id Envoy selected for this request.
 pub const SELECTOR_HEADER: &str = "x-gm-upstream-model";
 pub const CHAT_COMPLETIONS: &str = "/v1/chat/completions";
-pub const MODELS: &str = "/v1/models";
 
 /// Every `KubeTEE` chat model gm sources, by the upstream id its route
 /// names (`kubetee/<id>` in `docs/sourcing.md`).
@@ -238,42 +236,6 @@ impl KubeteeVerifier {
         Ok(Response::from_parts(parts, Body::new(body)))
     }
 
-    /// The upstream model list, narrowed to [`TARGETS`] and [`IMAGE_MODELS`], fetched on an
-    /// attested connection.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when no attested connection is available or the list
-    /// cannot be read.
-    pub async fn models(&self, request: Request<Body>) -> Result<Response<Body>> {
-        self.admission_verifier()?;
-        let mut upstream = Request::builder()
-            .method(Method::GET)
-            .uri(MODELS)
-            .header(HOST, HOST_NAME);
-        if let Some(authorization) = request.headers().get(AUTHORIZATION) {
-            upstream = upstream.header(AUTHORIZATION, authorization);
-        }
-        let upstream = upstream
-            .body(Body::empty())
-            .context("build KubeTEE model list request")?;
-        let mut connection = self.checkout().await?;
-        connection.requests += 1;
-        let result = timeout(
-            self.pool.limits().fetch_timeout,
-            read_models(&mut connection.sender, upstream),
-        )
-        .await
-        .context("KubeTEE model list fetch timed out")
-        .and_then(|result| result);
-        if result.is_ok() {
-            self.pool.give_back(connection);
-        } else {
-            connection.retire();
-        }
-        result
-    }
-
     /// How many idle attested connections are pooled.
     #[must_use]
     pub fn idle_connections(&self) -> usize {
@@ -375,50 +337,6 @@ async fn read_body(body: Incoming) -> Result<Bytes> {
         .await
         .map_err(|error| anyhow::anyhow!("read KubeTEE response: {error}"))?
         .to_bytes())
-}
-
-async fn read_models(
-    sender: &mut hyper::client::conn::http1::SendRequest<Body>,
-    request: Request<Body>,
-) -> Result<Response<Body>> {
-    let response = sender
-        .send_request(request)
-        .await
-        .context("send KubeTEE model list request")?;
-    let (mut parts, body) = response.into_parts();
-    let body = read_body(body).await?;
-    strip_supplier_headers(&mut parts.headers);
-    strip_hop_by_hop(&mut parts.headers);
-    if parts.status != StatusCode::OK {
-        return Ok(Response::from_parts(parts, Body::from(body)));
-    }
-    let list: Value = serde_json::from_slice(&body).context("decode KubeTEE model list")?;
-    let served = serde_json::to_vec(&served_targets(&list)).context("encode model list")?;
-    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
-    Ok(Response::from_parts(parts, Body::from(served)))
-}
-
-/// The upstream model list with every entry outside [`TARGETS`] and
-/// [`IMAGE_MODELS`] removed.
-#[must_use]
-pub fn served_targets(list: &Value) -> Value {
-    let data = list
-        .get("data")
-        .and_then(Value::as_array)
-        .map(|models| {
-            models
-                .iter()
-                .filter(|model| {
-                    model
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .is_some_and(|id| TARGETS.contains(&id) || IMAGE_MODELS.contains(&id))
-                })
-                .cloned()
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    serde_json::json!({"object": "list", "data": data})
 }
 
 /// Refuse anything but a chat completion for a target model. Runs before

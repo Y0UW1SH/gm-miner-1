@@ -160,10 +160,11 @@ available to you. A single worker can serve only one route per model, so run two
 two upstreams for the same model. Run `gmcli sources` to see the routes your registry currently
 publishes, and read [sourcing routes](docs/sourcing.md) for setup and settlement details.
 
-KubeTEE chat forwarding and model discovery are disabled in this image because the current
+KubeTEE chat forwarding is disabled in this image because the current
 attestation protocol does not verify an approved workload/model or bind the serving key to it.
-Requests receive 502 and `--verify-once` fails. Other providers and the separate KubeTEE image
-route retain their existing behavior; see
+Chat requests receive 502 and `--verify-once` fails. Model discovery is answered locally
+with only the image models served by the separate direct image route. Other providers and
+that image route retain their existing behavior; see
 [KubeTEE attestation verification](docs/sourcing.md#kubetee-attestation-verification).
 
 The Gemini image-generation products `gemini-3.1-flash-lite-image` and

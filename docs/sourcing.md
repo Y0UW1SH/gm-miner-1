@@ -302,17 +302,25 @@ image build and the normal image-approval process.
 
 ### KubeTEE attestation verification
 
-KubeTEE chat forwarding and `/v1/models` discovery are disabled in this image.
+KubeTEE chat forwarding is disabled in this image.
 The loopback verification proxy still starts when a KubeTEE key is set, so
-other configured providers continue to run. KubeTEE chat and model-list
+other configured providers continue to run. KubeTEE chat
 requests receive 502 immediately, before reading request bodies or opening
 upstream connections.
 `gm-kubetee-verify-proxy --verify-once` fails locally rather than reporting an
 attested endpoint. Disabled requests perform no attestation or collateral
 fetches and are not retried by the verifier. No buyer prompt, API key or
-model-list request is sent to the supplier on a rejected connection. There is no direct chat fallback or
-configuration flag to bypass this gate. Image generation retains its existing
-direct route; it does not use this chat verifier.
+request is sent to the supplier on a rejected connection. There is no direct
+chat fallback or configuration flag to bypass this gate. Image generation
+retains its existing direct route; it does not use this chat verifier.
+
+The registry's `GET /v1/models` capability check is answered locally with only
+the compiled image-model list, currently `black-forest-labs/flux.2-klein-4b`.
+It excludes every disabled chat model and performs no supplier or collateral
+fetch, and does not read the caller's body or forward its credentials. Envoy's
+existing caller authentication and configured key-slot admission still apply.
+This list describes the image route's capability; it does not attest the
+supplier or verify that a configured API key remains valid.
 
 The current protocol supports platform checks: Intel DCAP verification at
 `UpToDate` TCB with debug off, a fresh echoed nonce, `report_data` equal to
@@ -343,8 +351,9 @@ have offers for, so while a provider has no offer it is not probed and every one
 of its routes reads `YOU SERVE: no` however your workers are configured.
 Declaring one of them puts the provider into the probe set, which is what lets
 the count move for **all** of that provider's routes — the probe is per provider,
-not per route. It still has to reach the upstream before any count rises; a key
-the upstream rejects leaves them all at zero.
+not per route. When discovery comes from the upstream, it must succeed before
+any count rises; a rejected key leaves them all at zero. Local capability lists,
+including KubeTEE's image-only list, do not validate the supplier key.
 
 Once the provider is probed, a `YOU SERVE: no` on one of its other routes is
 telling you about that route rather than about the probe set: no worker of yours

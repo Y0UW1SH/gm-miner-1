@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use axum::http::header::AUTHORIZATION;
 use dcap_qvl::policy::QuoteClaims;
 use dcap_qvl::quote::{EnclaveReport, Report, TDReport10};
 use dcap_qvl::tcb_info::TcbStatus;
@@ -26,6 +27,7 @@ use hyper::service::service_fn;
 use ring::rand::SystemRandom;
 use ring::signature::{RsaKeyPair, RSA_PKCS1_SHA256};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
@@ -245,31 +247,6 @@ fn a_non_rs256_proof_fails_closed() {
 }
 
 #[test]
-fn the_model_list_is_narrowed_to_the_chat_and_image_models() {
-    let list = serde_json::json!({"object": "list", "data": [
-        {"id": "z-ai/glm-5.3", "object": "model"},
-        {"id": "minimax/h3", "object": "model"},
-        {"id": "black-forest-labs/flux.2-klein-4b", "object": "model"},
-        {"id": "all-proxy-models", "object": "model"},
-        {"id": "xiaomi/mimo-v2.6-pro", "object": "model"},
-        {"object": "model"},
-    ]});
-    let served = served_targets(&list);
-    assert_eq!(
-        served["data"],
-        serde_json::json!([
-            {"id": "z-ai/glm-5.3", "object": "model"},
-            {"id": "black-forest-labs/flux.2-klein-4b", "object": "model"},
-            {"id": "xiaomi/mimo-v2.6-pro", "object": "model"},
-        ])
-    );
-    assert_eq!(
-        served_targets(&serde_json::json!({}))["data"],
-        serde_json::json!([])
-    );
-}
-
-#[test]
 fn the_upstream_request_carries_no_supplier_or_selector_header() {
     let request = Request::builder()
         .method(Method::POST)
@@ -300,8 +277,6 @@ enum Chat {
     Slow,
     Unauthorized,
     Dropped,
-    /// The model list sends headers and half its body, then nothing.
-    StalledModelList,
     /// The chat sends its first event, then nothing more.
     FirstEventOnly,
     /// The chat sends one event, then supplier and ordinary trailers.
@@ -326,7 +301,6 @@ struct Upstream {
     accepts: AtomicUsize,
     attestations: AtomicUsize,
     chats: AtomicUsize,
-    model_lists: AtomicUsize,
     chat_headers: Mutex<Vec<HeaderMap>>,
     /// Every attestation request's query, headers and body length.
     attestation_requests: Mutex<Vec<(String, HeaderMap, usize)>>,
@@ -468,7 +442,7 @@ async fn chat_reply(chat: Chat) -> Option<Reply> {
                 .body(Either::Right(Frames::trailed(FIRST_EVENT, trailers)));
             return Some(response.unwrap());
         }
-        Chat::Served | Chat::StalledModelList => {}
+        Chat::Served => {}
     }
     let response = Response::builder()
         .status(200)
@@ -505,26 +479,6 @@ async fn handle(
             evidence => reply(200, attestation_body(evidence)),
         });
     }
-    if path == MODELS {
-        upstream.model_lists.fetch_add(1, Ordering::SeqCst);
-        let authorized = request
-            .headers()
-            .get(AUTHORIZATION)
-            .map(HeaderValue::as_bytes)
-            == Some(b"Bearer kt".as_slice());
-        let list = serde_json::json!({"object": "list", "data": [
-            {"id": "z-ai/glm-5.3", "object": "model"},
-            {"id": "minimax/h3", "object": "model"},
-            {"id": "black-forest-labs/flux.2-klein-4b", "object": "model"},
-        ]});
-        return Ok(if matches!(upstream.chat, Chat::StalledModelList) {
-            stalled(list.to_string().as_bytes())
-        } else if authorized {
-            reply(200, list.to_string())
-        } else {
-            reply(401, "{\"error\":\"no key\"}")
-        });
-    }
     upstream.chats.fetch_add(1, Ordering::SeqCst);
     let (parts, body) = request.into_parts();
     upstream.chat_headers.lock().unwrap().push(parts.headers);
@@ -556,7 +510,6 @@ async fn serve(evidence: Evidence, chat: Chat, limits: Limits) -> (KubeteeVerifi
         accepts: AtomicUsize::new(0),
         attestations: AtomicUsize::new(0),
         chats: AtomicUsize::new(0),
-        model_lists: AtomicUsize::new(0),
         chat_headers: Mutex::new(Vec::new()),
         attestation_requests: Mutex::new(Vec::new()),
     });
@@ -643,21 +596,6 @@ async fn a_chat_without_a_workload_policy_never_reaches_the_supplier() {
         assert_eq!(verifier.idle_connections(), 0);
         assert!(upstream.attestation_requests.lock().unwrap().is_empty());
     }
-}
-
-#[tokio::test]
-async fn a_model_list_without_a_workload_policy_never_reaches_the_supplier() {
-    let (verifier, upstream) = serve(Evidence::Genuine, Chat::Served, limits()).await;
-    let request = Request::builder()
-        .uri(MODELS)
-        .header(AUTHORIZATION, "Bearer kt")
-        .body(Body::empty())
-        .unwrap();
-    let error = verifier.models(request).await.unwrap_err();
-    assert!(format!("{error:#}").contains("no approved workload/model policy"));
-    assert_eq!(counts(&upstream), (0, 0, 0));
-    assert_eq!(upstream.model_lists.load(Ordering::SeqCst), 0);
-    assert_eq!(verifier.idle_connections(), 0);
 }
 
 #[tokio::test]
@@ -888,24 +826,6 @@ async fn an_attestation_body_that_stalls_times_out_and_is_retried() {
 }
 
 #[tokio::test]
-async fn a_model_list_body_that_stalls_times_out_and_retires_its_connection() {
-    let (verifier, upstream) =
-        serve_platform_evidence_only(Evidence::Genuine, Chat::StalledModelList, quick_fetch())
-            .await;
-    let request = Request::builder()
-        .uri(MODELS)
-        .header(AUTHORIZATION, "Bearer kt")
-        .body(Body::empty())
-        .unwrap();
-    let result = tokio::time::timeout(Duration::from_secs(10), verifier.models(request))
-        .await
-        .unwrap();
-    assert!(format!("{:#}", result.unwrap_err()).contains("timed out"));
-    assert_eq!(verifier.idle_connections(), 0);
-    assert_eq!(upstream.model_lists.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
 async fn each_event_reaches_the_caller_as_it_arrives() {
     let (verifier, _) =
         serve_platform_evidence_only(Evidence::Genuine, Chat::FirstEventOnly, limits()).await;
@@ -973,47 +893,6 @@ async fn an_upstream_error_status_passes_through() {
     let (status, body) = round_trip(&verifier, TARGETS[1]).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(body, "{\"error\":\"unauthorized\"}".as_bytes());
-}
-
-#[tokio::test]
-async fn the_model_list_is_fetched_on_an_attested_connection_and_narrowed() {
-    let (verifier, upstream) =
-        serve_platform_evidence_only(Evidence::Genuine, Chat::Served, limits()).await;
-    let request = Request::builder()
-        .uri(MODELS)
-        .header(AUTHORIZATION, "Bearer kt")
-        .body(Body::empty())
-        .unwrap();
-    let response = verifier.models(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let list: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(
-        list["data"],
-        serde_json::json!([
-            {"id": "z-ai/glm-5.3", "object": "model"},
-            {"id": "black-forest-labs/flux.2-klein-4b", "object": "model"},
-        ])
-    );
-    let keyless = Request::builder().uri(MODELS).body(Body::empty()).unwrap();
-    let response = verifier.models(keyless).await.unwrap();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    round_trip(&verifier, TARGETS[0]).await;
-    assert_eq!(
-        counts(&upstream),
-        (1, 1, 1),
-        "one attested connection serves all three"
-    );
-}
-
-#[tokio::test]
-async fn the_model_list_is_never_fetched_on_a_connection_that_failed_attestation() {
-    let (verifier, upstream) =
-        serve_platform_evidence_only(Evidence::OtherCertificate, Chat::Served, limits()).await;
-    let request = Request::builder().uri(MODELS).body(Body::empty()).unwrap();
-    assert!(verifier.models(request).await.is_err());
-    assert_eq!(counts(&upstream), (3, 3, 0));
-    assert_eq!(upstream.model_lists.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
