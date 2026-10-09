@@ -1251,6 +1251,7 @@ pub(crate) async fn cmd_worker_remove(cfg: Config, id: &str) -> Result<()> {
 
     let app_id = tracked.map(|w| w.app_id.clone());
     let worker_id = tracked.map_or_else(|| id.to_owned(), |w| w.worker_id.clone());
+    let tracked_snapshot = tracked.cloned();
     let registry_url = cfg.api_url();
 
     let mut client = RegistryClient::new(cfg);
@@ -1294,8 +1295,8 @@ pub(crate) async fn cmd_worker_remove(cfg: Config, id: &str) -> Result<()> {
         }
     }
 
-    // Drop the local record so `worker list`/re-deploy don't reference a
-    // deregistered worker. Locked so a concurrent deploy save can't resurrect it.
+    // Reload under the lock so concurrent saves are visible before removing
+    // local recovery data for the deregistered worker.
     config::with_config_lock(|| {
         let mut cfg = config::load().context("load gmcli config")?;
         cfg.active_network = Some(network);
@@ -1307,6 +1308,28 @@ pub(crate) async fn cmd_worker_remove(cfg: Config, id: &str) -> Result<()> {
                 "worker absence was confirmed using a different registry URL; local worker record retained. \
                  Remove any --api-url or GM_REGISTRY_URL override and verify the saved registry before retrying"
             );
+        }
+        if status == reqwest::StatusCode::NOT_FOUND {
+            // A redeploy can keep the old worker_id while saving a new CVM;
+            // registration can replace that id too. Neither replacement is
+            // covered by this command's earlier absence confirmation.
+            let worker_changed = cfg.active_network_entry().is_some_and(|entry| {
+                entry.workers.iter().any(|worker| {
+                    let matches = worker.worker_id == worker_id
+                        || tracked_snapshot.as_ref().is_some_and(|tracked| {
+                            (!tracked.app_id.is_empty() && worker.app_id == tracked.app_id)
+                                || (!tracked.app_name.is_empty()
+                                    && worker.app_name == tracked.app_name)
+                        });
+                    matches && tracked_snapshot.as_ref() != Some(worker)
+                })
+            });
+            if worker_changed {
+                bail!(
+                    "local worker record changed while confirming registry absence; local worker record retained. \
+                     Retry worker remove after the other command finishes"
+                );
+            }
         }
         cfg.active_entry_mut().remove_worker_by_id(&worker_id);
         config::save(&cfg).context("persist worker removal to gmcli config")

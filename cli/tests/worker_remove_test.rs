@@ -198,6 +198,112 @@ async fn registry_change_during_confirmation_keeps_local_recovery_record() {
         .is_empty());
 }
 
+async fn confirm_after_config_change(
+    server: &MockServer,
+    initial: &Value,
+    changed: &Value,
+) -> (std::process::Output, Value) {
+    let changed_bytes = serde_json::to_vec(changed).expect("serialize changed config");
+    let dir = tempfile::tempdir().expect("temporary config");
+    let file = dir.path().join("config.json");
+    Mock::given(method("GET"))
+        .and(path(LIST_PATH))
+        .respond_with(move |_: &wiremock::Request| {
+            std::fs::write(&file, &changed_bytes).expect("change saved worker");
+            ResponseTemplate::new(200).set_body_json(json!({"workers": []}))
+        })
+        .expect(1)
+        .mount(server)
+        .await;
+    run_in_dir(initial, WORKER_ID, None, None, dir.path()).await
+}
+
+#[tokio::test]
+async fn worker_change_during_confirmation_keeps_new_recovery_record() {
+    for (field, value) in [
+        ("app_id", json!("app_redeployed")),
+        ("node_secret", json!("replacement-secret")),
+        ("backends", json!({"openai": "azure"})),
+        ("provider_slots", json!({"openai": ["new-slot"]})),
+    ] {
+        let server = registry(ResponseTemplate::new(404)).await;
+        let initial = config(&server);
+        let mut changed = initial.clone();
+        // A redeploy keeps the old worker_id until registration succeeds,
+        // but saves its new CVM and recovery data before that registry POST.
+        changed["networks"]["testnet"]["workers"][1][field] = value;
+        let (output, saved) = confirm_after_config_change(&server, &initial, &changed).await;
+        assert_eq!(
+            saved, changed,
+            "the concurrently changed {field} must survive"
+        );
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("local worker record retained"));
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("phala cvms delete"));
+    }
+}
+
+#[tokio::test]
+async fn worker_added_during_confirmation_keeps_new_recovery_record() {
+    let server = registry(ResponseTemplate::new(404)).await;
+    let changed = config(&server);
+    let mut initial = changed.clone();
+    initial["networks"]["testnet"]["workers"]
+        .as_array_mut()
+        .expect("workers")
+        .remove(1);
+    let (output, saved) = confirm_after_config_change(&server, &initial, &changed).await;
+    assert_eq!(saved, changed, "a newly tracked worker must survive");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("local worker record retained"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("phala cvms delete"));
+}
+
+#[tokio::test]
+async fn worker_reregistered_during_confirmation_keeps_new_registry_identity() {
+    let server = registry(ResponseTemplate::new(404)).await;
+    let initial = config(&server);
+    let mut changed = initial.clone();
+    // register-image can register the same CVM under a new worker_id after
+    // the old registry worker has disappeared.
+    changed["networks"]["testnet"]["workers"][1]["worker_id"] = json!("01J0D");
+    let (output, saved) = confirm_after_config_change(&server, &initial, &changed).await;
+    assert_eq!(saved, changed);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("local worker record retained"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("phala cvms delete"));
+}
+
+#[tokio::test]
+async fn worker_name_reused_during_confirmation_keeps_replacement() {
+    let server = registry(ResponseTemplate::new(404)).await;
+    let initial = config(&server);
+    let mut changed = initial.clone();
+    // A completed redeploy can replace both identities under the same name.
+    changed["networks"]["testnet"]["workers"][1]["worker_id"] = json!("01J0D");
+    changed["networks"]["testnet"]["workers"][1]["app_id"] = json!("app_redeployed");
+    let (output, saved) = confirm_after_config_change(&server, &initial, &changed).await;
+    assert_eq!(saved, changed);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("local worker record retained"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("phala cvms delete"));
+}
+
+#[tokio::test]
+async fn worker_removed_during_confirmation_stays_idempotent() {
+    let server = registry(ResponseTemplate::new(404)).await;
+    let initial = config(&server);
+    let mut changed = initial.clone();
+    changed["networks"]["testnet"]["workers"]
+        .as_array_mut()
+        .expect("workers")
+        .remove(1);
+    let (output, saved) = confirm_after_config_change(&server, &initial, &changed).await;
+    assert_removed(&initial, &output, &saved);
+    assert_eq!(saved, changed);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("already absent"));
+}
+
 fn assert_removed(initial: &Value, output: &std::process::Output, saved: &Value) {
     assert!(
         output.status.success(),
