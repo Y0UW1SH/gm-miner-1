@@ -1263,7 +1263,34 @@ pub(crate) async fn cmd_worker_remove(cfg: Config, id: &str) -> Result<()> {
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        bail!("worker remove failed ({status}): {body}");
+        if status != reqwest::StatusCode::NOT_FOUND {
+            bail!("worker remove failed ({status}): {body}");
+        }
+
+        // A generic 404 can also mean a missing DELETE route. Confirm absence
+        // against the live worker list before discarding local recovery data.
+        let list_path = format!("/miners/{hotkey}/workers");
+        let response = client
+            .get(&list_path)
+            .await
+            .context("confirm worker absence after DELETE returned 404")?;
+        let list_status = response.status();
+        if !list_status.is_success() {
+            bail!("cannot confirm worker absence ({list_status}); local worker record retained");
+        }
+        let list: WorkerListResponse = response
+            .json()
+            .await
+            .context("parse worker list to confirm absence; local worker record retained")?;
+        if list
+            .workers
+            .iter()
+            .any(|worker| worker.worker_id == worker_id)
+        {
+            bail!(
+                "worker remove failed ({status}): {body}; worker is still listed in the registry"
+            );
+        }
     }
 
     // Drop the local record so `worker list`/re-deploy don't reference a
@@ -1275,7 +1302,11 @@ pub(crate) async fn cmd_worker_remove(cfg: Config, id: &str) -> Result<()> {
         config::save(&cfg).context("persist worker removal to gmcli config")
     })?;
 
-    println!("Worker {worker_id} deregistered from the registry.");
+    if status == reqwest::StatusCode::NOT_FOUND {
+        println!("Worker {worker_id} is already absent from the registry; local record removed.");
+    } else {
+        println!("Worker {worker_id} deregistered from the registry.");
+    }
     let reminder = match app_id {
         Some(app_id) => {
             format!("Now tear down the Phala CVM separately:\n  phala cvms delete {app_id}")
