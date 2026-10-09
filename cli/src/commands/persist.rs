@@ -126,7 +126,13 @@ where
             }
 
             let (token, from_refresh_grant) = obtain(&cfg).await?;
-            let previous_refresh = cfg.active_tokens().and_then(|t| t.refresh_token.clone());
+            // Only a refresh grant may retain a non-rotated refresh token.
+            // A device login starts a new chain, even when it returns none.
+            let previous_refresh = if from_refresh_grant {
+                cfg.active_tokens().and_then(|t| t.refresh_token.clone())
+            } else {
+                None
+            };
             let entry = token.to_entry_keeping(previous_refresh);
             let network = cfg.active_network().to_owned();
             let override_active = cfg.api_url_override.is_some();
@@ -771,6 +777,52 @@ mod tests {
             cfg.active_tokens().expect("tokens").access_token.as_deref(),
             Some("other-command-access")
         );
+    }
+
+    #[tokio::test]
+    async fn device_login_without_refresh_token_does_not_keep_rejected_token() {
+        let _guard = ConfigDirGuard::new();
+        for override_active in [false, true] {
+            let mut cfg = config_with_near_expiry("https://stored.invalid", 60);
+            config::save(&cfg).expect("seed credentials");
+            if override_active {
+                cfg.api_url_override = Some("https://override.invalid".to_owned());
+            }
+            let cfg = ensure_fresh_token_with(
+                cfg,
+                async |_| {
+                    Ok((
+                        auth::TokenResponse {
+                            access_token: "device-access".to_owned(),
+                            refresh_token: None,
+                            expires_in: Some(3600),
+                            token_type: None,
+                        },
+                        false,
+                    ))
+                },
+                |_| std::future::ready(()),
+            )
+            .await
+            .expect("device login succeeded");
+            assert_eq!(
+                cfg.active_tokens().expect("tokens").refresh_token,
+                None,
+                "a new login must not inherit the rejected refresh token"
+            );
+            let disk = config::load().expect("saved credentials");
+            assert_eq!(
+                disk.active_tokens()
+                    .expect("tokens")
+                    .refresh_token
+                    .as_deref(),
+                if override_active {
+                    Some("stored-refresh")
+                } else {
+                    None
+                }
+            );
+        }
     }
 
     #[tokio::test]
