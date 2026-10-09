@@ -76,6 +76,13 @@ they are dispatch targets, not products a buyer can request by name. The
 route, including self routes. It falls back to the older cross-product-only
 endpoint while reporting a registry that predates the complete route catalog.
 
+KubeTEE chat routes listed above are unavailable in this image: workload/model
+admission fails closed and the image omits `kubetee-attested-chat`. Do not
+activate or declare those chat offers with this image. See
+[KubeTEE attestation verification](#kubetee-attestation-verification) for the
+requirements to restore them. The separate image-generation route is described
+below.
+
 ### FLUX.2 Klein image generation
 
 `flux.2-klein-4b` is the buyer product. KubeTEE serves it using its
@@ -236,10 +243,6 @@ gmcli declare-product --provider deepinfra --model deepseek-ai/DeepSeek-V4.1-Fla
 gmcli declare-product --provider deepinfra --model Qwen/Qwen3.6-35B-A3B --discount-pct 5
 gmcli declare-product --provider deepinfra --model Qwen/Qwen3.8-27B --discount-pct 5
 gmcli declare-product --provider deepinfra --model openai/gpt-oss-20b --discount-pct 5
-gmcli declare-product --provider kubetee --model z-ai/glm-5.2 --discount-pct 5
-gmcli declare-product --provider kubetee --model z-ai/glm-5.3 --discount-pct 5
-gmcli declare-product --provider kubetee --model z-ai/glm-5.3-flash --discount-pct 5
-gmcli declare-product --provider kubetee --model deepseek/deepseek-v4.1-flash --discount-pct 5
 gmcli declare-product --provider kubetee --model black-forest-labs/flux.2-klein-4b --discount-pct 5
 gmcli declare-product --provider moonmath --model glm-5.2 --discount-pct 5
 gmcli declare-product --provider moonmath --model kimi-k3 --discount-pct 5
@@ -299,40 +302,31 @@ image build and the normal image-approval process.
 
 ### KubeTEE attestation verification
 
-With a KubeTEE key set, the image runs a co-located KubeTEE verifier, and every
-KubeTEE chat request is served through it; there is no direct KubeTEE chat
-route. The verifier keeps a small pool of keep-alive TLS 1.3 connections to
-`llm.kubetee.ai`. Each connection is attested before any request is sent on
-it: the verifier requests a quote for a fresh nonce on that connection and
-requires
+KubeTEE chat forwarding and `/v1/models` discovery are disabled in this image.
+The loopback verification proxy still starts when a KubeTEE key is set, so
+other configured providers continue to run. KubeTEE requests receive 502;
+`gm-kubetee-verify-proxy --verify-once` fails rather than reporting an attested
+endpoint. No buyer prompt, API key or model-list request is sent to the
+supplier on a rejected connection. There is no direct chat fallback or
+configuration flag to bypass this gate. Image generation retains its existing
+direct route; it does not use this chat verifier.
 
-- the nonce echoed back exactly;
-- the Intel TDX quote verifying at `UpToDate` TCB with the debug bit clear;
-- the quote's `report_data` equal to SHA-512 of the nonce;
-- the CC event log replaying to the quote's RTMR0-3;
-- KubeTEE's TLS-possession proof naming this connection's certificate, with
-  that certificate's key signing the nonce.
+The current protocol supports platform checks: Intel DCAP verification at
+`UpToDate` TCB with debug off, a fresh echoed nonce, `report_data` equal to
+SHA-512 of that nonce, a CC event log replaying to the quoted RTMR0-3, and a
+separate signature over the nonce by the live TLS certificate's key. Those
+checks establish platform health and evidence consistency. They do not
+identify an independently approved workload or model, or bind the serving TLS
+key into the quote. A matching supplier-provided event log and the captured
+live fixture are evidence, not trusted reference policies.
 
-An attested connection carries one request at a time and is renewed after 10
-minutes or 100 requests; a connection that fails or closes is retired and the
-next request attests a new one. A connection whose attestation fails is never
-used, and the request gets a 502. A chat request is never sent twice.
-The supplier's `x-kubetee-*` and `x-litellm-*` response headers are removed
-before the response leaves the worker. The verifier logs the replica's pod name
-and measured registers (MRTD, MRCONFIGID, RTMR0-3) for each attested
-connection.
-
-The verifier serves only the chat models compiled into the image:
-`z-ai/glm-5.2`, `z-ai/glm-5.3`, `z-ai/glm-5.3-flash`,
-`deepseek/deepseek-v4.1-flash`, `ornith/ornith-1.5-397b` and
-`xiaomi/mimo-v2.6-pro`. Envoy answers a chat request for any other KubeTEE model
-with 400, and the verifier refuses a request whose body names a model other than
-the one selected. Image generation keeps its direct route. Its `GET /v1/models`
-answer is KubeTEE's own list narrowed to those chat models and the image model
-the image route serves, `black-forest-labs/flux.2-klein-4b`. Each attestation
-and model-list response is read within 60 seconds, body included. Adding a
-KubeTEE chat model requires a new image build and the normal image-approval
-process.
+Admission therefore fails closed even when all platform checks succeed. The
+image no longer advertises `kubetee-attested-chat`. Restoring chat requires
+independently reviewed workload/model references, evidence that binds the
+serving key to the approved workload with protected key custody, and a
+verifiable binding of model identity and routing to that workload. This
+requires provider-side evidence and the normal image-approval process; the
+compiled request model list alone cannot supply these guarantees.
 
 `gmcli sources` prints this line for you, pre-filled, for every undeclared route
 where declaring it would actually get you somewhere — one a worker already

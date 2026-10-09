@@ -5,8 +5,9 @@
 //! quote bound to a fresh nonce and verifies it: Intel DCAP chain and an
 //! `UpToDate` TCB, a TDX report with debug off, `report_data = SHA-512(nonce)`,
 //! the event log replaying to RTMR0-3, and the serving certificate's key
-//! signing the nonce. Chat requests are then sent on attested connections
-//! only, one at a time per connection.
+//! signing the nonce. These checks do not authorize a workload or bind its
+//! serving key. Admission therefore fails closed until an independently
+//! approved workload/model policy and key binding can be verified.
 
 pub mod evidence;
 pub mod pool;
@@ -108,6 +109,14 @@ pub struct Attestation {
     pub measurements: Measurements,
 }
 
+type VerifyAttestation = fn(
+    &AttestationPayload,
+    &str,
+    &[u8],
+    &dcap_qvl::policy::QuoteClaims,
+    u64,
+) -> Result<Measurements>;
+
 #[derive(Clone)]
 pub struct KubeteeVerifier {
     tls: TlsConnector,
@@ -115,6 +124,7 @@ pub struct KubeteeVerifier {
     collateral: Arc<dyn Collateral>,
     nonce: fn() -> [u8; 32],
     pool: Arc<Pool>,
+    verify_attestation: VerifyAttestation,
 }
 
 impl fmt::Debug for KubeteeVerifier {
@@ -161,6 +171,7 @@ impl KubeteeVerifier {
             collateral,
             nonce,
             pool: Arc::new(Pool::new(limits)),
+            verify_attestation: evidence::verify_attestation,
         }
     }
 
@@ -334,7 +345,7 @@ impl KubeteeVerifier {
         let now = self.collateral.now()?;
         let claims = tee_evidence::verify_signature_chain(&quote, collateral, now)?;
         let measurements =
-            evidence::verify_attestation(&payload, &nonce, connection.leaf.as_ref(), &claims, now)?;
+            (self.verify_attestation)(&payload, &nonce, connection.leaf.as_ref(), &claims, now)?;
         evidence::log_attested(&payload.pod, &measurements);
         Ok(Attestation {
             pod: payload.pod,
