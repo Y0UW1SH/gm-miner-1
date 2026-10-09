@@ -236,6 +236,13 @@ async fn poll_for_token(
             return Ok(token);
         }
 
+        // Redirects are terminal even if their body contains a retryable
+        // OAuth error such as authorization_pending or slow_down.
+        if status.is_redirection() {
+            eprintln!();
+            bail!("unexpected status from token endpoint: {status}");
+        }
+
         // A rate-limited poll says nothing about the device code, which is
         // still pending: back off as the gateway asks and keep polling.
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {

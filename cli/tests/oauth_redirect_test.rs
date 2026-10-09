@@ -20,7 +20,14 @@ async fn redirect_servers(status: u16, endpoint: &str) -> (MockServer, MockServe
 
     Mock::given(method("POST"))
         .and(path(endpoint))
-        .respond_with(ResponseTemplate::new(status).insert_header("Location", destination_url))
+        .respond_with(
+            ResponseTemplate::new(status)
+                .insert_header("Location", destination_url)
+                // A retryable OAuth error must not override a redirect status.
+                .set_body_json(serde_json::json!({"error": "authorization_pending"})),
+        )
+        // An unexpected retry gets 404, making the regression fail promptly.
+        .up_to_n_times(1)
         .expect(1)
         .mount(&source)
         .await;
@@ -135,6 +142,15 @@ async fn device_token_poll_does_not_follow_redirects() {
 
         assert_destination_not_contacted(&destination, status).await;
         let error = result.expect_err("a device token redirect must fail");
+        let requests = source
+            .received_requests()
+            .await
+            .expect("mock records requests");
+        assert_eq!(
+            requests.len(),
+            2,
+            "device authorization and one token poll must be the only requests"
+        );
         assert!(error.to_string().contains(&status.to_string()));
     }
 }
