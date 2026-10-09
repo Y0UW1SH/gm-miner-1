@@ -383,6 +383,9 @@ static_resources:
                                 headers:remove("x-envoy-upstream-rq-per-try-timeout-ms")
                                 headers:remove("x-envoy-hedge-on-per-try-timeout")
                               else
+                                -- Envoy may match repeated values individually. Drop
+                                -- non-ordinary markers before matching the direct route.
+                                headers:remove("x-gm-ordinary")
                                 -- Lets the local reply mapper answer 503 if the
                                 -- verifier cannot be reached.
                                 handle:streamInfo():dynamicMetadata():set(

@@ -1730,6 +1730,67 @@ fn chutes_only_a_single_ordinary_marker_of_exactly_one_goes_direct() {
 }
 
 #[test]
+fn chutes_ambiguous_ordinary_markers_cannot_match_the_direct_route() {
+    let rendered = chutes_config();
+    let selector = "zai-org/GLM-5.2-TEE";
+    for markers in [
+        vec![("x-gm-ordinary", "1"), ("x-gm-ordinary", "1")],
+        vec![("x-gm-ordinary", "1"), ("x-gm-ordinary", "0")],
+        vec![("x-gm-ordinary", "0"), ("X-GM-Ordinary", "1")],
+        vec![("x-gm-ordinary", ""), ("x-gm-ordinary", "1")],
+        vec![("x-gm-ordinary", "1"), ("x-gm-ordinary", "")],
+        vec![("x-gm-ordinary", "1,0")],
+        vec![("x-gm-ordinary", "0")],
+        vec![("x-gm-ordinary", "true")],
+    ] {
+        let mut headers = vec![
+            (":path", "/v1/chat/completions"),
+            ("x-gm-provider", "chutes"),
+            ("x-gm-node-key", "test-node-secret-0001"),
+            ("x-gm-upstream-model", selector),
+        ];
+        headers.extend(markers.iter().copied());
+        let lua = run_request(
+            &rendered,
+            &headers,
+            &[
+                ("CHUTES_API_KEY", "chutes-key"),
+                ("GM_CHUTES_KEY_SLOT_1", "chutes-key"),
+            ],
+        );
+        let after_lua = lua
+            .globals()
+            .get::<mlua::Table>("input_headers")
+            .expect("headers after Lua");
+        assert!(
+            after_lua
+                .get::<Option<mlua::Value>>("x-gm-ordinary")
+                .expect("ordinary marker")
+                .is_none(),
+            "{markers:?}: a repeated value could match an ordinary route"
+        );
+        assert_eq!(
+            after_lua
+                .get::<String>("x-gm-upstream-model")
+                .expect("selector"),
+            selector
+        );
+        assert_eq!(
+            after_lua.get::<String>("authorization").expect("auth"),
+            "Bearer chutes-key"
+        );
+        assert_eq!(
+            lua.globals()
+                .get::<mlua::Table>("route_metadata")
+                .expect("route metadata")
+                .get::<Option<bool>>("chutes_verifier")
+                .expect("verifier marker"),
+            Some(true)
+        );
+    }
+}
+
+#[test]
 fn the_ordinary_marker_is_stripped_from_other_providers() {
     let (status, _, stderr, rendered) = render_envoy([("ZAI_API_KEY", "zai-key")]);
     assert!(status.success(), "render failed: {stderr}");
