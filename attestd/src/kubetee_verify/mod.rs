@@ -65,6 +65,8 @@ pub const TARGETS: [&str; 6] = [
 /// Image models the direct `/v1/images/generations` route serves. They are
 /// listed in model discovery; chat for them is refused.
 pub const IMAGE_MODELS: [&str; 1] = ["black-forest-labs/flux.2-klein-4b"];
+/// Video models the direct `/v1/videos` route serves.
+pub const VIDEO_MODELS: [&str; 1] = ["minimax/h3"];
 
 /// Header families the supplier sets that are removed in both directions.
 const SUPPLIER_HEADER_PREFIXES: [&str; 2] = ["x-kubetee-", "x-litellm-"];

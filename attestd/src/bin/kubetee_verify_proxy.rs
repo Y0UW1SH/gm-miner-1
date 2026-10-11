@@ -9,7 +9,7 @@ use axum::http::{Request, Response, StatusCode};
 use axum::routing::{any, get};
 use axum::{Json, Router};
 use gm_miner_attestd::kubetee_verify::{
-    error_response, KubeteeVerifier, BIND_ADDR, HOST_NAME, IMAGE_MODELS, TARGETS,
+    error_response, KubeteeVerifier, BIND_ADDR, HOST_NAME, IMAGE_MODELS, TARGETS, VIDEO_MODELS,
 };
 use gm_miner_attestd::upstream_proxy::option_value;
 use tracing::info;
@@ -86,15 +86,15 @@ async fn health() -> StatusCode {
 
 // Envoy authenticates the caller and selects a configured key slot before
 // reaching this loopback route. Discovery neither reads that key/body nor
-// contacts the supplier; only the direct image route remains available.
+// contacts the supplier; only the direct image and video routes remain available.
 async fn models(_request: Request<Body>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "object": "list",
-        "data": IMAGE_MODELS.map(|model| serde_json::json!({
+        "data": IMAGE_MODELS.into_iter().chain(VIDEO_MODELS).map(|model| serde_json::json!({
             "id": model,
             "object": "model",
             "owned_by": "kubetee",
-        })),
+        })).collect::<Vec<_>>(),
     }))
 }
 
@@ -120,7 +120,7 @@ mod tests {
     use http_body_util::BodyExt as _;
 
     #[tokio::test]
-    async fn image_discovery_is_local_and_never_reads_the_caller_body() {
+    async fn image_and_video_discovery_is_local_and_never_reads_the_caller_body() {
         let polls = Arc::new(AtomicUsize::new(0));
         let body_polls = Arc::clone(&polls);
         let body = futures_util::stream::poll_fn(move |_| {
@@ -143,11 +143,18 @@ mod tests {
             catalog,
             serde_json::json!({
                 "object": "list",
-                "data": IMAGE_MODELS.map(|model| serde_json::json!({
-                    "id": model,
-                    "object": "model",
-                    "owned_by": "kubetee",
-                })),
+                "data": [
+                    {
+                        "id": "black-forest-labs/flux.2-klein-4b",
+                        "object": "model",
+                        "owned_by": "kubetee",
+                    },
+                    {
+                        "id": "minimax/h3",
+                        "object": "model",
+                        "owned_by": "kubetee",
+                    },
+                ],
             })
         );
         assert!(catalog["data"]

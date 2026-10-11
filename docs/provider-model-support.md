@@ -45,7 +45,7 @@ authority for which explicit routes that registry has published.
 KubeTEE chat sources in the table are disabled in this image. Its verifier
 cannot authorize the serving workload/model or establish quote-bound serving
 key ownership, so chat fails closed. Local model discovery lists only the
-image models served by the direct image route. See
+image and video models served by the direct routes. See
 [KubeTEE attestation verification](sourcing.md#kubetee-attestation-verification).
 
 | Model you want to provide | Supported sources |

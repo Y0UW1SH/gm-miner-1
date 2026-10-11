@@ -40,6 +40,8 @@ explains the table and how to set each upstream up.
 | `qwen/qwen3.6-35b-a3b` | `deepinfra/Qwen/Qwen3.6-35B-A3B` | `api.deepinfra.com` | `--deepinfra` |
 | `qwen/qwen3.8-27b` | `deepinfra/Qwen/Qwen3.8-27B` | `api.deepinfra.com` | `--deepinfra` |
 | `openai/gpt-oss-20b` | `deepinfra/openai/gpt-oss-20b` | `api.deepinfra.com` | `--deepinfra` |
+| `google/veo-3.1-fast` | `deepinfra/google/veo-3.1-fast` | `api.deepinfra.com` | `--deepinfra` |
+| `wan-ai/wan-2.6-t2v` | `deepinfra/Wan-AI/Wan2.6-T2V` | `api.deepinfra.com` | `--deepinfra` |
 | `zai/glm-5.2` | `engy/glm-5.2` | `api.engy.ai` | `--engy` |
 | `deepseek/deepseek-v4-flash-0731` | `engy/deepseek-v4-flash-0731` | `api.engy.ai` | `--engy` |
 | `deepseek/deepseek-v4.1-flash` | `engy/deepseek-v4.1-flash` | `api.engy.ai` | `--engy` |
@@ -51,6 +53,7 @@ explains the table and how to set each upstream up.
 | `zai/glm-5.2-tee` | `kubetee/z-ai/glm-5.2` | `llm.kubetee.ai` | `--kubetee` |
 | `zai/glm-5.3-flash-tee` | `kubetee/z-ai/glm-5.3-flash` | `llm.kubetee.ai` | `--kubetee` |
 | `zai/glm-5.3-tee` | `kubetee/z-ai/glm-5.3` | `llm.kubetee.ai` | `--kubetee` |
+| `minimax/h3` | `kubetee/minimax/h3` | `llm.kubetee.ai` | `--kubetee` |
 | `qwen/qwen3.8-flash-next` | `kubetee/qwen/qwen3.8-flash-next` | retired by KubeTEE | `--kubetee` |
 | `moonshot/kimi-k3` | `kubetee/moonshotai/kimi-k3` | retired by KubeTEE (2026-09-24) | `--kubetee` |
 | `deepseek/deepseek-v4-flash-0731` | `kubetee/deepseek/deepseek-v4-flash-0731` | retired by KubeTEE (2026-09-24) | `--kubetee` |
@@ -80,8 +83,13 @@ KubeTEE chat routes listed above are unavailable in this image: workload/model
 admission fails closed and the image omits `kubetee-attested-chat`. Do not
 activate or declare those chat offers with this image. See
 [KubeTEE attestation verification](#kubetee-attestation-verification) for the
-requirements to restore them. The separate image-generation route is described
-below.
+requirements to restore them. The separate image and video routes remain
+available as described below.
+
+Video routes serve ordinary supply and require a worker image with `video-jobs-v1`.
+Wan 2.6 serves 1920x1080 video; Veo 3.1-fast serves eight-second 1280x720 video.
+Video suppliers may charge the miner when a job is accepted. If an accepted
+job later fails, the buyer is not charged and the miner carries any upstream job cost.
 
 ### FLUX.2 Klein image generation
 
@@ -311,15 +319,16 @@ upstream connections.
 attested endpoint. Disabled requests perform no attestation or collateral
 fetches and are not retried by the verifier. No buyer prompt, API key or
 request is sent to the supplier on a rejected connection. There is no direct
-chat fallback or configuration flag to bypass this gate. Image generation
-retains its existing direct route; it does not use this chat verifier.
+chat fallback or configuration flag to bypass this gate. Image generation and
+video jobs retain their direct routes; they do not use this chat verifier.
 
 The registry's `GET /v1/models` capability check is answered locally with only
-the compiled image-model list, currently `black-forest-labs/flux.2-klein-4b`.
+the compiled image and video model lists: `black-forest-labs/flux.2-klein-4b`
+and `minimax/h3`.
 It excludes every disabled chat model and performs no supplier or collateral
 fetch, and does not read the caller's body or forward its credentials. Envoy's
 existing caller authentication and configured key-slot admission still apply.
-This list describes the image route's capability; it does not attest the
+This list describes the direct routes' capabilities; it does not attest the
 supplier or verify that a configured API key remains valid.
 
 The current protocol supports platform checks: Intel DCAP verification at
@@ -353,7 +362,7 @@ Declaring one of them puts the provider into the probe set, which is what lets
 the count move for **all** of that provider's routes — the probe is per provider,
 not per route. When discovery comes from the upstream, it must succeed before
 any count rises; a rejected key leaves them all at zero. Local capability lists,
-including KubeTEE's image-only list, do not validate the supplier key.
+including KubeTEE's image and video list, do not validate the supplier key.
 
 Once the provider is probed, a `YOU SERVE: no` on one of its other routes is
 telling you about that route rather than about the probe set: no worker of yours

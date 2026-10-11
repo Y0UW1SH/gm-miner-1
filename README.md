@@ -163,7 +163,7 @@ publishes, and read [sourcing routes](docs/sourcing.md) for setup and settlement
 KubeTEE chat forwarding is disabled in this image because the current
 attestation protocol does not verify an approved workload/model or bind the serving key to it.
 Chat requests receive 502 and `--verify-once` fails. Model discovery is answered locally
-with only the image models served by the separate direct image route. Other providers and
+with only the image and video models served by the separate direct routes. Other providers and
 that image route retain their existing behavior; see
 [KubeTEE attestation verification](docs/sourcing.md#kubetee-attestation-verification).
 
