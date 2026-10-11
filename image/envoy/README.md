@@ -86,14 +86,15 @@ These apply to every provider route unless its file says otherwise.
   - A body larger than the connection buffer cannot be replayed, so Envoy
     skips that retry.
 - **No retry** on ordinary Chutes `-TEE` requests (`x-gm-ordinary: 1`), on
-  non-idempotent image paths (DeepInfra `/v1/inference/`, KubeTEE image
-  generation), on the loopback NEAR, Chutes-verifier, KubeTEE-verifier
-  and attestation routes (a retry would mask a local failure), or on
-  benchmark (it would distort the measurement). The Lua filter strips
-  caller-supplied retry and hedge controls on ordinary
-  Chutes `-TEE` requests and the two image paths before routing. Chutes can
-  process paid inference before returning a reset or 5xx; without a
-  provider-enforced idempotency guarantee, a replay can incur another charge.
+  non-idempotent paths (DeepInfra `/v1/inference/`, KubeTEE image generation,
+  and both suppliers' `/v1/videos` and `/v1/videos/` routes), on the loopback
+  NEAR, Chutes-verifier, KubeTEE-verifier and attestation routes (a retry would
+  mask a local failure), or on benchmark (it would distort the measurement).
+  The Lua filter strips caller-supplied retry and hedge controls on ordinary
+  Chutes `-TEE` requests, native inference, image generation, and video POSTs
+  before routing. Chutes can process paid inference before returning a reset
+  or 5xx; without a provider-enforced idempotency guarantee, a replay can incur
+  another charge.
 - **Keyless probes see a 401.** A direct route stays in place when its key is
   unset. Lua then sends an empty key, the upstream answers 401, and the
   registry reads "no key" the same way it reads "key revoked".
